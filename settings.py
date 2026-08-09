@@ -10,7 +10,8 @@ import pandas as pd
 NUM_CLIENTS = 5
 NUM_ROUNDS = 10
 TARGET_DATA = "ROSPaCe_complete/ROSPaCe_complete_noperiodicity.csv"
-SPLIT_UNIT = 1000000
+VALIDATION_DATA = f"split_data/chunk_{NUM_CLIENTS+1}.csv"
+SPLIT_UNIT = 1200000
 SPLIT_DIR = "split_data"
 LOG_DIR = "logs"
 MODEL_DIR = "model"
@@ -68,7 +69,7 @@ class MainRunner(object):
                     f"--target_data={self._resolve_data_path()}",
                     f"--split_dir={os.path.join(self.base_dir, SPLIT_DIR)}",
                     f"--unit={SPLIT_UNIT}",
-                    f"--chunk={NUM_CLIENTS}",
+                    f"--chunk={NUM_CLIENTS + 1}", # one for server validation data
                 ],
                 stdout=split_log,
                 stderr=split_log,
@@ -85,6 +86,7 @@ class MainRunner(object):
                     f"--model_dir={os.path.join(self.base_dir, MODEL_DIR)}",
                     f"--num_clients={NUM_CLIENTS}",
                     f"--num_rounds={NUM_ROUNDS}",
+                    f"--validation_data_path={VALIDATION_DATA}",
                 ],
                 stdout=server_log,
                 stderr=server_log,

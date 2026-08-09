@@ -1,43 +1,92 @@
 import argparse
 import os
+import re
+import numpy as np
+import pandas as pd
+import xgboost as xgb
 from typing import Dict, List, Optional, Tuple
 import flwr as fl
 from flwr.common import FitRes, Parameters, Scalar
 from flwr.server.client_proxy import ClientProxy
 
 
+def convert_type(x):
+    if (isinstance(x, (int, float, np.number)) and not pd.isna(x)) and not isinstance(x, bool):
+        return x
+
+    if pd.isna(x) or x == '':
+        return ''
+
+    try:
+        num = pd.to_numeric(x)
+        return num
+    except Exception:
+        try:
+            return str(x)
+        except Exception:
+            return ''
+
+
+def preprocess_data(df):
+    feature_cols = [col for col in df.columns if col != 'attack']
+
+    if hasattr(df, 'map'):
+        df[feature_cols] = df[feature_cols].map(convert_type)
+    else:
+        df[feature_cols] = df[feature_cols].applymap(convert_type)
+
+    df.replace([np.inf, -np.inf], -1, inplace=True)
+    df.fillna(-1, inplace=True)
+    df = df.dropna(thresh=1, axis=1)
+
+    if 'attack' in df.columns:
+        attack_mapping = {
+            'observe': 0, 'metasploit SYN flood': 1, 'nmap discovery': 1,
+            'nmap SYN flood': 1, 'ros2 node crashing': 1,
+            'ros2 reconnaissance': 1, 'ros2 reflection': 1
+        }
+        df['attack'] = df['attack'].replace(attack_mapping).infer_objects(copy=False)
+        df['attack'] = pd.to_numeric(df['attack'], errors='coerce').fillna(0).astype(int)
+
+    df = df.drop(columns=[i for i in df.columns if "Unnamed" in i or "timestamp" in i], errors='ignore')
+
+    non_numeric_cols = df.select_dtypes(exclude=[np.number, 'bool']).columns
+    for col in non_numeric_cols:
+        if col != 'attack':
+            df[col] = pd.Categorical(df[col]).codes
+
+    df.columns = [re.sub(r"[\[\]<>]", "_", str(col)) for col in df.columns]
+    return df.astype(np.float32)
+
+
 class XGBoostStrategy(fl.server.strategy.FedAvg):
-    def __init__(self, model_dir: str, num_clients: int):
+    def __init__(self, model_dir: str, num_clients: int, val_data_path: Optional[str] = None):
         self.num_clients = num_clients
         self.model_dir = os.path.abspath(model_dir)
         os.makedirs(self.model_dir, exist_ok=True)
-        self.latest_model_path = os.path.join(self.model_dir, "global_model_latest.model")
+        self.latest_model_path = os.path.join(self.model_dir, "global_model_latest.ubj")
+
+        self.dval = None
+        if val_data_path and os.path.exists(val_data_path):
+            print(f"[Info] Loading server-side validation data from {val_data_path}...")
+            df_val = pd.read_csv(val_data_path)
+            df_val = preprocess_data(df_val)
+            X_val = df_val.iloc[:, :-1]
+            y_val = df_val.iloc[:, -1]
+            self.dval = xgb.DMatrix(X_val, label=y_val)
+            self.y_true = y_val.values
 
         super().__init__(
             fraction_fit=1.0,
-            fraction_evaluate=1.0,
+            fraction_evaluate=0.0,
             min_fit_clients=num_clients,
-            min_evaluate_clients=num_clients,
+            min_evaluate_clients=0,
             min_available_clients=num_clients,
         )
 
     def initialize_parameters(
         self, client_manager
     ) -> Optional[Parameters]:
-        """
-        Flower 在整個訓練開始前會呼叫這個方法一次，決定第一輪要用什麼
-        全域模型。預設（回傳 None）會觸發 Flower 去跟隨機一個 client
-        要初始參數（也就是原本 log 裡看到的
-        "Requesting initial parameters from one random client"）。
-
-        這裡改成：如果 model_dir 底下已經有上一次訓練存下的
-        global_model_latest.model，就直接讀取它的 bytes，包成
-        Parameters 回傳，當作這一次啟動的起始模型 —— 等於接續上一次
-        訓練的結果繼續往下練，而不是每次啟動都從零開始。
-
-        若檔案不存在（例如第一次執行、或 model_dir 是全新的資料夾），
-        則回傳 None，維持 Flower 原本「跟隨機 client 要初始參數」的行為。
-        """
         if os.path.exists(self.latest_model_path):
             with open(self.latest_model_path, "rb") as f:
                 model_bytes = f.read()
@@ -56,18 +105,26 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
         return None
 
     def _extract_payload(self, parameters: Optional[Parameters]) -> Optional[bytes]:
-        """
-        方案 B 下，client 端（XGBoostClient，繼承 fl.client.Client）
-        已經直接把 xgb.Booster.save_model() 產生的 raw bytes 放進
-        Parameters.tensors，沒有再經過 NumPyClient 的 numpy 序列化包裝，
-        所以這裡不需要再做任何 np.load / np.frombuffer 的解碼，
-        直接取出來的 bytes 就是合法的 xgboost 模型檔內容。
-        """
         if parameters is None or not getattr(parameters, "tensors", None):
             return None
         if not parameters.tensors:
             return None
         return bytes(parameters.tensors[0])
+
+    def _evaluate_model_on_server(self, model_bytes: bytes) -> float:
+        if self.dval is None:
+            return 0.0
+        try:
+            bst = xgb.Booster()
+            bst.load_model(bytearray(model_bytes))
+            preds = bst.predict(self.dval)
+            
+            preds_binary = [1 if p > 0.5 else 0 for p in preds]
+            correct = sum(1 for p, y in zip(preds_binary, self.y_true) if p == y)
+            return correct / len(self.y_true)
+        except Exception as e:
+            print(f"[Error] Failed to evaluate model on server: {e}")
+            return 0.0
 
     def aggregate_fit(
         self,
@@ -81,89 +138,66 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
             return None, {}
 
         if failures:
-            # 有 client 端 fit 失敗，這種情況值得留下紀錄以便排查
             print(f"[Warning] Round {server_round} had {len(failures)} client failure(s): {failures}")
 
         payloads = []
-
         for client_proxy, fit_res in results:
             payload = self._extract_payload(fit_res.parameters)
-            metrics = fit_res.metrics or {}
-            accuracy = float(metrics.get("accuracy", 0.0))
-            load_failures = int(metrics.get("model_load_failures", 0))
-
-            if load_failures > 0:
-                print(
-                    f"[Warning] Round {server_round} client {client_proxy.cid} reported "
-                    f"{load_failures} model load failure(s) so far. That client may have "
-                    f"trained from scratch this round instead of continuing federated training."
-                )
-
             if payload:
-                payloads.append((payload, accuracy))
-            else:
-                print(f"[Warning] Round {server_round} client {client_proxy.cid} returned an empty payload.")
+                if self.dval is not None:
+                    server_score = self._evaluate_model_on_server(payload)
+                    print(f"[Server Eval] Client {client_proxy.cid} Accuracy: {server_score:.4f}")
+                    payloads.append((payload, server_score, client_proxy.cid))
+                else:
+                    metrics = fit_res.metrics or {}
+                    payloads.append((payload, float(metrics.get("accuracy", 0.0)), client_proxy.cid))
 
-        if not payloads:
-            print(f"[Warning] Round {server_round} has no valid model payloads.")
-            return None, {}
+        best_payload, best_accuracy, best_cid = max(payloads, key=lambda item: item[1])
 
-        # 只保留分數最高的 client 模型，作為下一輪的全域模型。
-        best_payload, best_accuracy = max(payloads, key=lambda item: item[1])
-
-        model_path = os.path.join(self.model_dir, f"global_model_round_{server_round}.model")
-
-        with open(model_path, "wb") as f:
-            f.write(best_payload)
-        with open(self.latest_model_path, "wb") as f:
-            f.write(best_payload)
+        model_path = os.path.join(self.model_dir, f"global_model_round_{server_round}.ubj")
+        with open(model_path, "wb") as f: f.write(best_payload)
+        with open(self.latest_model_path, "wb") as f: f.write(best_payload)
 
         print(f"[Info] Round {server_round} kept the highest-scoring model (accuracy={best_accuracy:.4f}) "
               f"and saved it to {model_path}")
 
-        # tensor_type 標記與 client 端一致，方便日後追蹤格式來源；
-        # tensors 直接放 raw bytes，不經過任何 numpy 轉換。
         aggregated_parameters = Parameters(tensors=[best_payload], tensor_type="xgboost-ubj")
         return aggregated_parameters, {"accuracy": best_accuracy}
 
-    def aggregate_evaluate(
-        self,
-        server_round: int,
-        results: List[Tuple[ClientProxy, fl.common.EvaluateRes]],
-        failures: List[BaseException],
-    ) -> Tuple[Optional[float], Dict[str, Scalar]]:
+    # def aggregate_evaluate(
+    #     self,
+    #     server_round: int,
+    #     results: List[Tuple[ClientProxy, fl.common.EvaluateRes]],
+    #     failures: List[BaseException],
+    # ) -> Tuple[Optional[float], Dict[str, Scalar]]:
 
-        if not results:
-            print(f"Round {server_round} has no evaluate results to aggregate.")
-            return None, {}
+    #     if not results:
+    #         print(f"Round {server_round} has no evaluate results to aggregate.")
+    #         return None, {}
 
-        if failures:
-            print(f"[Warning] Round {server_round} had {len(failures)} evaluate failure(s): {failures}")
+    #     if failures:
+    #         print(f"[Warning] Round {server_round} had {len(failures)} evaluate failure(s): {failures}")
 
-        # 計算每個 client 評估結果的加權準確率與加權 loss
-        accuracies = [float(r.metrics.get("accuracy", 0.0)) * r.num_examples for _, r in results]
-        losses = [float(r.loss) * r.num_examples for _, r in results]
-        examples = [r.num_examples for _, r in results]
+    #     accuracies = [float(r.metrics.get("accuracy", 0.0)) * r.num_examples for _, r in results]
+    #     losses = [float(r.loss) * r.num_examples for _, r in results]
+    #     examples = [r.num_examples for _, r in results]
 
-        total_examples = sum(examples)
-        if total_examples == 0:
-            return None, {}
+    #     total_examples = sum(examples)
+    #     if total_examples == 0:
+    #         return None, {}
 
-        weighted_accuracy = sum(accuracies) / total_examples
-        weighted_loss = sum(losses) / total_examples
+    #     weighted_accuracy = sum(accuracies) / total_examples
+    #     weighted_loss = sum(losses) / total_examples
 
-        # 診斷用：把每個 client 個別的 accuracy 印出來，方便判斷
-        # 「accuracy 恆為 1.0」是全域現象還是只發生在特定 client（通常代表
-        # 該 client 本地測試集只有單一類別，或發生資料洩漏)。
-        per_client_acc = {
-            client_proxy.cid: float(r.metrics.get("accuracy", 0.0))
-            for client_proxy, r in results
-        }
-        print(f"[Diagnostic] Round {server_round} per-client accuracy: {per_client_acc}")
-        print(f"[Info] Round {server_round} global validation accuracy: {weighted_accuracy:.4f}, "
-              f"loss: {weighted_loss:.4f}\n")
+    #     per_client_acc = {
+    #         client_proxy.cid: float(r.metrics.get("accuracy", 0.0))
+    #         for client_proxy, r in results
+    #     }
+    #     print(f"[Diagnostic] Round {server_round} per-client accuracy: {per_client_acc}")
+    #     print(f"[Info] Round {server_round} global validation accuracy: {weighted_accuracy:.4f}, "
+    #           f"loss: {weighted_loss:.4f}\n")
 
-        return weighted_loss, {"accuracy": weighted_accuracy}
+    #     return weighted_loss, {"accuracy": weighted_accuracy}
 
 
 if __name__ == "__main__":
@@ -172,11 +206,13 @@ if __name__ == "__main__":
     parser.add_argument("--num_rounds", type=int, default=1, help="Number of rounds to train the model.")
     parser.add_argument("--num_clients", type=int, default=1, help="Number of clients to train the model.")
     parser.add_argument("--server_address", type=str, default="0.0.0.0:8080", help="Flower server address")
+    parser.add_argument("--validation_data_path", type=str, default="split_data/chunk_0.csv", help="Path to the validation data CSV file.")
     args = parser.parse_args()
 
     strategy = XGBoostStrategy(
         model_dir=args.model_dir,
-        num_clients=args.num_clients
+        num_clients=args.num_clients,
+        val_data_path=args.validation_data_path
     )
 
     print("[Info] Flower Server (XGBoost) is starting...")

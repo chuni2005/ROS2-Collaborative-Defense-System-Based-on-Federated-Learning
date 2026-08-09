@@ -1,2 +1,7 @@
 __pycache__
 ROSPace_complete
+logs
+tmp
+split_data
+model
+output_models

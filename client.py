@@ -23,11 +23,7 @@ import re
 import tempfile
 import traceback
 
-# 這個字串用來標記 Parameters.tensors 裡裝的是「原始 xgboost ubj bytes」，
-# 而不是經過 numpy 序列化包裝過的資料。方案 B 全程都直接搬運 raw bytes，
-# 不會經過 NumPyClient 內部的 ndarrays_to_parameters()/np.save，
-# 因此 client 端存的模型檔與 server 端存的模型檔會是同一種格式，
-# 都可以直接被 xgb.Booster().load_model() 讀取。
+
 TENSOR_TYPE = "xgboost-ubj"
 
 
@@ -90,12 +86,8 @@ def load_local_data(client_id, data_path, eval_data_path=None):
     features = df_train_cleaned.drop(['attack'], axis=1)
     train_feature_names = features.columns.tolist()
 
-    # --- 診斷用：確認整體標籤分佈，方便排查 accuracy 恆為 1.0 的原因 ---
-    # 若某個 client 的資料本來就只有單一類別（例如依攻擊類型切分資料集），
-    # 不論模型好壞，accuracy 都會逼近 1.0，這不是訓練流程的 bug。
     print(f"[Diagnostic] [Client {client_id}] Overall label distribution:\n{label.value_counts()}")
 
-    # 若標籤只有單一類別，stratify 會報錯，這裡先偵測並跳過 stratify
     label_counts = label.value_counts()
     can_stratify = label_counts.shape[0] > 1 and label_counts.min() >= 2
 
@@ -116,7 +108,6 @@ def load_local_data(client_id, data_path, eval_data_path=None):
     print(f"[Diagnostic] [Client {client_id}] Val label dist:\n{y_val.value_counts()}")
     print(f"[Diagnostic] [Client {client_id}] Test label dist:\n{y_test_local.value_counts()}")
 
-    # --- 診斷用：檢查 train/test 之間是否有完全重複的樣本（可能代表資料洩漏） ---
     dup_mask = pd.concat([x_train, x_test_local]).duplicated(keep=False)
     n_dup_in_test = dup_mask.iloc[len(x_train):].sum()
     print(
@@ -137,19 +128,6 @@ def load_local_data(client_id, data_path, eval_data_path=None):
 
 
 class XGBoostClient(fl.client.Client):
-    """
-    方案 B：直接繼承 fl.client.Client（而非 NumPyClient）。
-
-    NumPyClient 會把 get_parameters() 回傳的 ndarray 用 Flower 內部的
-    ndarrays_to_parameters()（本質是 np.save 轉 bytes）包裝成 Parameters.tensors，
-    導致 Parameters.tensors[0] 裡面其實是「npy 格式」，不是原始 xgboost ubj bytes。
-    如果 server 端直接把這包 bytes 寫到磁碟當模型檔，檔案前面會多出 npy header，
-    無法被 xgb.Booster().load_model() 直接讀取。
-
-    這裡改成直接操作 Parameters/FitRes/EvaluateRes/GetParametersRes 物件，
-    Parameters.tensors 裡全程都是 xgb.Booster.save_model() 產生的原始 bytes，
-    不經過任何 numpy 序列化，client 端與 server 端存下來的模型檔案格式完全一致。
-    """
 
     def __init__(self, client_id, data_path, eval_data_path=None):
         self.client_id = client_id
@@ -166,9 +144,6 @@ class XGBoostClient(fl.client.Client):
             "eval_metric": ["logloss"], "tree_method": "hist"
         }
 
-    # ------------------------------------------------------------------
-    # 模型序列化 / 反序列化的 helper（純 bytes <-> xgb.Booster，不經過 numpy）
-    # ------------------------------------------------------------------
     def _load_model_from_bytes(self, model_bytes):
         if not model_bytes:
             return None
@@ -182,9 +157,8 @@ class XGBoostClient(fl.client.Client):
             booster = xgb.Booster()
             booster.load_model(tmp_file)
             return booster
+
         except Exception as e:
-            # 不要靜默吞掉：反序列化失敗代表這一輪聯邦訓練實質上斷鏈了
-            # （下一輪會從零開始訓練，卻不會有任何明顯錯誤訊息）。
             self.model_load_failures += 1
             print(
                 f"[ERROR] [Client {self.client_id}] Model load failed "
@@ -213,7 +187,6 @@ class XGBoostClient(fl.client.Client):
                 os.remove(tmp_file)
 
     def _save_model_artifact(self):
-        # 訓練完後
         importance = self.bst.get_score(importance_type='gain')
         sorted_importance = sorted(importance.items(), key=lambda x: x[1], reverse=True)
         print("Top 15 features by gain:")
@@ -243,9 +216,6 @@ class XGBoostClient(fl.client.Client):
         tensors = [model_bytes] if model_bytes else []
         return Parameters(tensors=tensors, tensor_type=TENSOR_TYPE)
 
-    # ------------------------------------------------------------------
-    # 評估
-    # ------------------------------------------------------------------
     def _evaluate_global_on_local_test(self):
         print("[Info-Test] Server global model - local test")
         if self.bst is None:
@@ -261,7 +231,6 @@ class XGBoostClient(fl.client.Client):
             print(f"[Warning] Global model evaluation failed: {e}")
 
     def _evaluate_local_test(self):
-        """回傳 (logloss, accuracy)，logloss 供 Flower 的 loss 欄位使用。"""
         print("[Info-Test] Client local model - local test")
         if self.bst is None:
             print("[Warning] Local model is None, skipping evaluation on local test set.")
@@ -285,10 +254,6 @@ class XGBoostClient(fl.client.Client):
             print(f"[Warning] Local model evaluation failed: {e}")
             return 1.0, 0.0
 
-    # ------------------------------------------------------------------
-    # Flower Client 介面：get_parameters / fit / evaluate
-    # 這三個方法的 signature 是 fl.client.Client 的標準介面（非 NumPyClient）。
-    # ------------------------------------------------------------------
     def get_parameters(self, ins: GetParametersIns) -> GetParametersRes:
         parameters = self._parameters_from_booster()
         return GetParametersRes(
@@ -300,9 +265,7 @@ class XGBoostClient(fl.client.Client):
         self.current_round += 1
         print(f"\n[Client {self.client_id}] Recieve Server Message - {self.current_round} Round Fit Start")
 
-        # loading global model sent by Server
         self._set_booster_from_parameters(ins.parameters)
-        # Test global model on local test set before local training
         self._evaluate_global_on_local_test()
 
         print(f"[Info] [Client {self.client_id}] Training...")
@@ -313,7 +276,6 @@ class XGBoostClient(fl.client.Client):
         )
 
         local_logloss, local_accuracy = self._evaluate_local_test()
-        # Save the trained model artifact for later use or analysis
         self._save_model_artifact()
 
         return FitRes(
@@ -356,9 +318,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     print(f"Flower Client {args.client_id} running ...")
-    # 這裡用 start_client（非 deprecated 的 start_numpy_client），
-    # 且 XGBoostClient 已經是 fl.client.Client 的子類別，
-    # 不需要再呼叫 .to_client()。
     fl.client.start_client(
         server_address=args.server_address,
         client=XGBoostClient(args.client_id, args.data_path)

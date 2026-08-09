@@ -50,13 +50,6 @@ def split_csv(tmp_file_path, args):
             return
         f_remain.write(header)
 
-        # 先把「這次最多能取用 unit 行」的資料實際讀出來，藉此得知
-        # 本次真正可用的行數 total_lines。原本的寫法是假設一定有
-        # unit 行、用固定的 chunks_size 依序填每個 chunk 檔案，
-        # 一旦資料提前用完（例如最後一批資料不足 unit 行），後面
-        # 還沒輪到的 chunk 檔案就會完全分不到資料，變成只有 header
-        # 的空檔案。改成先讀出實際行數，再依「實際行數」分配，
-        # 就能避免這個問題。
         lines = []
         for _ in range(args.unit):
             line = infile.readline()
@@ -78,10 +71,6 @@ def split_csv(tmp_file_path, args):
                     f"every chunk at least one row."
                 )
 
-            # 把 total_lines 盡量平均分配到 args.chunk 個檔案：
-            # 前 extra 個檔案多分配 1 筆，其餘分配 base 筆，
-            # 例如 total_lines=700, chunk=3 -> sizes=[234, 233, 233]，
-            # 而不是原本固定 chunks_size 導致最後一個檔案拿到 0 筆。
             base = total_lines // args.chunk
             extra = total_lines % args.chunk
             sizes = [base + 1 if i < extra else base for i in range(args.chunk)]
@@ -109,8 +98,6 @@ def split_csv(tmp_file_path, args):
                 for outfile in out_files:
                     outfile.close()
 
-        # unit 行讀完之後，如果來源檔案還有剩，寫回 remain file，
-        # 留給下一次執行繼續處理。
         while True:
             chunk_data = infile.read(1024**2)
             if not chunk_data:
