@@ -11,8 +11,11 @@ NUM_CLIENTS = 5
 NUM_ROUNDS = 10
 TARGET_DATA = "ROSPaCe_complete/ROSPaCe_complete_noperiodicity.csv"
 VALIDATION_DATA = f"split_data/chunk_{NUM_CLIENTS+1}.csv"
+
 SPLIT_UNIT = 1200000
 SPLIT_DIR = "split_data"
+SPLIT_RANDOM = True
+
 LOG_DIR = "logs"
 MODEL_DIR = "model"
 SPACE_CHECK = False
@@ -69,8 +72,8 @@ class MainRunner(object):
                     f"--target_data={self._resolve_data_path()}",
                     f"--split_dir={os.path.join(self.base_dir, SPLIT_DIR)}",
                     f"--unit={SPLIT_UNIT}",
-                    f"--chunk={NUM_CLIENTS + 1}", # one for server validation data
-                ],
+                    f"--chunk={NUM_CLIENTS + 1}", # one for server validation data 
+                ] + (["--random"] if SPLIT_RANDOM else []),
                 stdout=split_log,
                 stderr=split_log,
                 check=True,

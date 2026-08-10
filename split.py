@@ -1,5 +1,6 @@
 import argparse
 import os
+import random
 import shutil
 import sys
 
@@ -33,7 +34,7 @@ def copy_data(data_path):
     return tmp_file_path
 
 
-def split_csv(tmp_file_path, args):
+def split_csv_ordered(tmp_file_path, args):
     print(f"[Info] Splitting source data into {args.unit} rows per file...")
 
     remain_file_path = tmp_file_path + ".remain"
@@ -113,6 +114,86 @@ def split_csv(tmp_file_path, args):
         os.remove(tmp_file_path)
         print("[Info] No remaining data to process.")
 
+import csv
+import os
+import random
+
+def split_csv_random(tmp_file_path, args):
+    print(f"[Info] Safely sampling {args.unit} rows randomly using Python native CSV engine...")
+
+    remain_file_path = tmp_file_path + ".remain"
+    sampled_rows = []
+    header = None
+
+    with (
+        open(tmp_file_path, "r", encoding="utf-8", newline="") as infile,
+        open(remain_file_path, "w", encoding="utf-8", newline="") as f_remain,
+    ):
+        reader = csv.reader(infile)
+        writer = csv.writer(f_remain)
+
+        header = next(reader, None)
+        if not header:
+            print("[Warning] Source file is empty!")
+            return
+        writer.writerow(header)
+
+        for i, row in enumerate(reader):
+            if i < args.unit:
+                sampled_rows.append(row)
+            else:
+                j = random.randint(0, i)
+                if j < args.unit:
+                    writer.writerow(sampled_rows[j])
+                    sampled_rows[j] = row
+                else:
+                    writer.writerow(row)
+
+    total_lines = len(sampled_rows)
+
+    if total_lines == 0:
+        print("[Warning] No data left to split.")
+        if os.path.exists(remain_file_path): os.remove(remain_file_path)
+        if os.path.exists(tmp_file_path): os.remove(tmp_file_path)
+        return
+
+    random.shuffle(sampled_rows)
+
+    if total_lines < args.chunk:
+        print(f"[Warning] Only {total_lines} row(s) sampled, fewer than --chunk={args.chunk}.")
+
+    base = total_lines // args.chunk
+    extra = total_lines % args.chunk
+    sizes = [base + 1 if i < extra else base for i in range(args.chunk)]
+
+    out_files = [
+        open(os.path.join(args.split_dir, f"chunk_{i}.csv"), "w", encoding="utf-8", newline="")
+        for i in range(1, args.chunk + 1)
+    ]
+    csv_writers = [csv.writer(f) for f in out_files]
+
+    try:
+        for cw in csv_writers:
+            cw.writerow(header)
+
+        idx = 0
+        for cw, size in zip(csv_writers, sizes):
+            for _ in range(size):
+                if idx < len(sampled_rows):
+                    cw.writerow(sampled_rows[idx])
+                    idx += 1
+    finally:
+        for f in out_files:
+            f.close()
+
+    if os.path.exists(remain_file_path) and os.path.getsize(remain_file_path) > 10:
+        os.replace(remain_file_path, tmp_file_path)
+        print(f"[Info] Successfully extracted {total_lines} random rows and updated original file.")
+    else:
+        if os.path.exists(remain_file_path): os.remove(remain_file_path)
+        if os.path.exists(tmp_file_path): os.remove(tmp_file_path)
+        print("[Info] All data has been consumed. No remaining data to process.")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Split a CSV file into multiple smaller CSV files based on the specified number of rows per file.")
@@ -120,11 +201,15 @@ def main():
     parser.add_argument("--split_dir", type=str, help="Directory where the split CSV files will be saved.")
     parser.add_argument("--unit", type=int, default=1000, help="Number of rows per process file. Default is 1000.")
     parser.add_argument("--chunk", type=int, default=1, help="Number of chunks to split the data for.")
+    parser.add_argument("--random", action="store_true", help="Enable random sampling instead of chronological splitting.")
     args = parser.parse_args()
 
     detect(args)
     tmp = copy_data(args.target_data)
-    split_csv(tmp, args)
+    if args.random:
+        split_csv_random(tmp, args)
+    else:
+        split_csv_ordered(tmp, args)
 
 if __name__ == "__main__":
     main()
