@@ -1,7 +1,8 @@
 __pycache__
 ROSPace_complete
-logs
-tmp
-split_data
-model
+model_training/logs
+model_training/tmp
+model_training/split
+model_training/img
+model_training/model
 output_models
