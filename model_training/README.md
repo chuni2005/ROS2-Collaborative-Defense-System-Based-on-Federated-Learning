@@ -2,7 +2,7 @@
 > python ./split.py --target_data `../ROSPaCe_complete/ROSPaCe_complete.csv ` --split_dir `./split` --unit `1000` --chunk `1` --mode `Direct`
 
 ## 切分方法
-### 直接切割（Direct）
+### 直接切割（Sequential）
 不打亂原始資料，直接依據資料在母體中的先後順序或索引大小進行區段切割。
 複製一份到tmp folder -> 切割unit大小出去 -> 分成chunk數量的資料 -> 切出去的資料請不要在tmp中存在（刪除）
 

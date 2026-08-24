@@ -19,19 +19,6 @@ plt.rcParams['font.sans-serif'] = ['Arial', 'Microsoft JhengHei', 'SimHei']
 plt.rcParams['axes.unicode_minus'] = False
 
 
-def detect(args):
-    if not os.path.exists(args.target_data):
-        print("[Error] Source data not found.")
-        sys.exit(1)
-
-    if not os.path.exists(args.split_dir):
-        os.makedirs(args.split_dir, exist_ok=True)
-
-    if args.unit <= 0 or args.chunk <= 0 or args.unit % args.chunk != 0:
-        print("[Error] SPLIT_UNIT must be a positive integer and divisible by CHUNK.")
-        sys.exit(1)
-
-
 def copy_data(data_path):
     if os.path.exists(tmp_data_path):
         print(f"[Info] {tmp_data_path} already exists. Skipping copy.")
@@ -158,76 +145,6 @@ def plot_distribution(csv_file_path, title_text="Data Label"):
     plt.close()
 
     print(f"[Info] Distribution chart successfully saved as '{file_name}' from CSV source.")
-
-
-def split_csv_ordered(chunk_paths, tmp_file_path, args):
-    print(f"[Info] Chronologically splitting {args.unit} rows into {args.chunk} chunks...")
-
-    remain_file_path = tmp_file_path + ".remain"
-    has_remaining = False
-
-    with (
-        open(tmp_file_path, "r", encoding="utf-8", newline="") as infile,
-        open(remain_file_path, "w", encoding="utf-8", newline="") as f_remain,
-    ):
-        reader = csv.reader(infile)
-        remain_writer = csv.writer(f_remain)
-
-        header = next(reader, None)
-        if header is None:
-            print("[Warning] Source file is empty!")
-            return
-        remain_writer.writerow(header)
-
-        rows = []
-        for row in reader:
-            if len(rows) >= args.unit:
-                has_remaining = True
-                remain_writer.writerow(row)
-            else:
-                rows.append(row)
-
-        total_lines = len(rows)
-
-        if total_lines == 0:
-            print("[Warning] No data left in tmp to split.")
-        else:
-            if total_lines < args.chunk:
-                print(
-                    f"[Warning] Only {total_lines} row(s) remain this round, "
-                    f"fewer than --chunk={args.chunk}. Empty chunks may occur."
-                )
-
-            base = total_lines // args.chunk
-            extra = total_lines % args.chunk
-            sizes = [base + 1 if i < extra else base for i in range(args.chunk)]
-
-            out_files = [open(path, "w", encoding="utf-8", newline="") for path in chunk_paths]
-            writers = [csv.writer(f) for f in out_files]
-
-            try:
-                for writer in writers:
-                    writer.writerow(header)
-
-                idx = 0
-                for writer, size in zip(writers, sizes):
-                    for _ in range(size):
-                        if idx < total_lines:
-                            writer.writerow(rows[idx])
-                            idx += 1
-            finally:
-                for f in out_files:
-                    f.close()
-
-            print(f"[Info] Successfully created {args.chunk} chunks from {total_lines} source rows.")
-
-    if has_remaining:
-        os.replace(remain_file_path, tmp_file_path)
-        print(f"[Info] tmp folder updated. Remaining data is preserved for the next process.")
-    else:
-        os.remove(remain_file_path)
-        os.remove(tmp_file_path)
-        print("[Info] All data has been entirely consumed. tmp files cleaned up.")
 
 
 def split_csv_random(chunk_paths, tmp_file_path, args):
