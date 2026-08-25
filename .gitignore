@@ -6,3 +6,4 @@ split_data
 model
 output_models
 dataset/*
+!.gitkeep

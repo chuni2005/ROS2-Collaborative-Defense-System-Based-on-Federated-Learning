@@ -1,5 +1,5 @@
 import { createApp, computed, onMounted, ref } from './vendor/vue.esm-browser.prod.js'
-import { getMachines, getAllStatus, selectMachine, getDiagnosis, getMessages, usePolling } from './api.js'
+import { getMachines, getAllStatus, selectMachine, getDiagnosis, getPublisherStatus, usePolling } from './api.js'
 
 const MachineSelectConfirm = {
   props: { machines: { type: Array, required: true }, modelValue: { type: Number, default: null } },
@@ -77,6 +77,7 @@ const StatusLights = {
         <li v-for="m in statuses" :key="m.id" class="status-row" :class="{ active: m.id === activeMachineId }">
           <span class="light" :style="{ backgroundColor: lightColor[m.light] }"></span>
           <span class="name">{{ m.name }}</span>
+          <span class="score">{{ m.score !== null ? m.score.toFixed(1) : '-' }}</span>
         </li>
       </ul>
     </section>
@@ -92,10 +93,12 @@ const DiagnosisPanel = {
   template: `
     <section class="panel diagnosis-panel">
       <h2>版1</h2>
-      <p class="subtitle">後端診斷的機台狀態 · {{ machineName }}</p>
+      <p class="subtitle">AI 信任分數診斷 · {{ machineName }}</p>
       <p v-if="error" class="error">連線失敗，請確認後端已啟動</p>
       <template v-else-if="diagnosis">
-        <p class="status-line">狀態：<strong>{{ diagnosis.status }}</strong></p>
+        <p class="status-line">
+          狀態：<strong :class="{ blocked: diagnosis.blocked }">{{ diagnosis.status }}</strong>
+        </p>
         <div class="details">
           <p class="section-title">詳細資訊</p>
           <ul>
@@ -103,40 +106,49 @@ const DiagnosisPanel = {
           </ul>
         </div>
         <div class="score-block">
-          <p class="section-title">分數與持續時間之類的</p>
-          <p>信心分數：{{ diagnosis.score.toFixed(1) }}</p>
-          <p>持續時間：{{ diagnosis.durationSeconds }} 秒</p>
+          <p class="section-title">信任分數</p>
+          <p>{{ diagnosis.score !== null ? diagnosis.score.toFixed(1) : '尚無資料' }}</p>
         </div>
       </template>
     </section>
   `,
 }
 
-const MessagesPanel = {
+const PublisherStatusPanel = {
   props: { machineId: { type: Number, required: true }, machineName: { type: String, required: true } },
   setup(props) {
-    const { data: messages, error } = usePolling(() => getMessages(props.machineId))
+    const { data: status, error } = usePolling(() => getPublisherStatus(props.machineId))
     const formatTime = (iso) => new Date(iso).toLocaleTimeString()
-    return { messages, error, formatTime }
+    return { status, error, formatTime }
   },
   template: `
     <section class="panel messages-panel">
       <h2>版2</h2>
-      <p class="subtitle">機台送出的訊息 · {{ machineName }}</p>
+      <p class="subtitle">機台 Publisher 運作狀態 · {{ machineName }}</p>
       <p v-if="error" class="error">連線失敗，請確認後端已啟動</p>
-      <ul v-else class="message-list">
-        <li v-for="(msg, i) in messages" :key="i" class="message-row" :class="msg.level">
-          <span class="time">{{ formatTime(msg.timestamp) }}</span>
-          <span class="content">{{ msg.content }}</span>
-        </li>
-        <li v-if="messages && messages.length === 0" class="empty">尚無訊息</li>
-      </ul>
+      <template v-else-if="status">
+        <p class="status-line">
+          狀態：
+          <strong :class="{ blocked: status.blocked }">{{ status.blocked ? '已截斷（不正常）' : '正常運作中' }}</strong>
+        </p>
+        <p v-if="status.blocked" class="hint">剩餘 {{ status.blockedSecondsRemaining.toFixed(1) }} 秒後恢復</p>
+        <div class="details">
+          <p class="section-title">截斷紀錄</p>
+          <ul class="message-list">
+            <li v-for="(h, i) in status.history" :key="i" class="message-row error">
+              <span class="time">{{ formatTime(h.time) }}</span>
+              <span class="content">觸發分數 {{ h.score.toFixed(1) }}</span>
+            </li>
+            <li v-if="status.history.length === 0" class="empty">尚無截斷紀錄</li>
+          </ul>
+        </div>
+      </template>
     </section>
   `,
 }
 
 const App = {
-  components: { MachineSelectConfirm, PanelMachineSelectors, StatusLights, DiagnosisPanel, MessagesPanel },
+  components: { MachineSelectConfirm, PanelMachineSelectors, StatusLights, DiagnosisPanel, PublisherStatusPanel },
   setup() {
     const machines = ref([])
     const activeMachineId = ref(null)
@@ -154,6 +166,10 @@ const App = {
     return { machines, activeMachineId, panel1MachineId, panel2MachineId, panel1Name, panel2Name }
   },
   template: `
+    <header class="app-header">
+      <h1>機台監控 Demo</h1>
+      <p>ROS2 聯邦學習防禦系統 · 即時監控面板</p>
+    </header>
     <main class="dashboard" v-if="machines.length">
       <MachineSelectConfirm class="area-select" :machines="machines" v-model="activeMachineId" />
       <PanelMachineSelectors
@@ -164,7 +180,7 @@ const App = {
       />
       <StatusLights class="area-status" :active-machine-id="activeMachineId" />
       <DiagnosisPanel class="area-panel1" :machine-id="panel1MachineId" :machine-name="panel1Name" />
-      <MessagesPanel class="area-panel2" :machine-id="panel2MachineId" :machine-name="panel2Name" />
+      <PublisherStatusPanel class="area-panel2" :machine-id="panel2MachineId" :machine-name="panel2Name" />
     </main>
   `,
 }

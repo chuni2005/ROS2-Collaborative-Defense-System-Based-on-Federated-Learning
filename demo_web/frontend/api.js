@@ -15,7 +15,7 @@ export const selectMachine = (machineId) =>
     body: JSON.stringify({ machineId }),
   })
 export const getDiagnosis = (machineId) => request(`/api/machines/${machineId}/diagnosis`)
-export const getMessages = (machineId) => request(`/api/machines/${machineId}/messages`)
+export const getPublisherStatus = (machineId) => request(`/api/machines/${machineId}/publisher-status`)
 
 export function usePolling(fetchFn, { intervalMs = 1000, immediate = true } = {}) {
   const data = ref(null)

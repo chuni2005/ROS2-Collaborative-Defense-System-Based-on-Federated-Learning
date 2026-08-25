@@ -1,5 +1,4 @@
 import os
-import random
 import threading
 import time
 from datetime import datetime, timezone
@@ -9,57 +8,65 @@ from flask import Flask, jsonify, request
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend")
 
 MACHINE_COUNT = 5
-LIGHTS = ["green", "green", "green", "yellow", "red", "gray"]
-DIAGNOSIS_TEXT = {"green": "正常", "yellow": "警告", "red": "異常", "gray": "離線"}
-MESSAGE_SAMPLES = [
-    "心跳封包已送出",
-    "CPU 使用率過高",
-    "偵測到異常封包流量",
-    "已完成本輪聯邦學習訓練",
-    "與伺服器連線逾時，重試中",
-    "感測器讀值超出正常範圍",
-    "節點重新啟動完成",
-]
+
+# 機台來源 IP -> 機台編號，寫死的對照表。127.0.0.1 留給本機測試用，
+# 之後請把實際機台的區網 IP 換進來。
+IP_MACHINE_MAP = {
+    "127.0.0.1": 1,
+}
+
+SCORE_THRESHOLD = 50          # 信任分數低於此值視為異常
+ABNORMAL_SUSTAIN_SECONDS = 4  # 異常持續幾秒才觸發截斷（3~5 秒）
+BLOCK_DURATION_SECONDS = 7    # 觸發後截斷幾秒（5~10 秒）
+BLOCK_HISTORY_LIMIT = 20
 
 lock = threading.Lock()
 machines = {
     i: {
         "id": i,
         "name": f"機台{i}",
-        "light": "green",
-        "score": 100.0,
-        "duration": 0,
-        "messages": [],
+        "score": None,          # 最新一次收到的信任分數
+        "last_update": None,    # 最近一次成功處理資料的時間 (epoch seconds)
+        "abnormal_since": None, # 分數持續低於門檻的起始時間
+        "blocked_until": None,  # 目前截斷狀態會維持到什麼時候
+        "block_history": [],    # 觸發截斷的紀錄
     }
     for i in range(1, MACHINE_COUNT + 1)
 }
 
 
-def now_iso():
-    return datetime.now(timezone.utc).isoformat()
+def now_iso(ts=None):
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() if ts else datetime.now(timezone.utc).isoformat()
 
 
-def tick():
-    while True:
-        with lock:
-            for m in machines.values():
-                if random.random() < 0.15:
-                    m["light"] = random.choice(LIGHTS)
+def compute_diagnosis(machine_id, row):
+    # TODO: 換成真正的 AI 信任分數判斷（由負責 API 串接的人接手）。
+    # row 是機台送來的一列資料；這裡先回傳一個固定的高分做預設值。
+    return 100.0
 
-                m["score"] = min(100.0, max(0.0, m["score"] + random.randint(-5, 5)))
-                m["duration"] = 0 if m["light"] == "gray" else m["duration"] + 1
 
-                if random.random() < 0.3:
-                    level = {"red": "error", "yellow": "warning"}.get(m["light"], "info")
-                    m["messages"].append(
-                        {
-                            "timestamp": now_iso(),
-                            "level": level,
-                            "content": random.choice(MESSAGE_SAMPLES),
-                        }
-                    )
-                    del m["messages"][:-100]
-        time.sleep(1)
+def is_blocked(m, now):
+    return m["blocked_until"] is not None and now < m["blocked_until"]
+
+
+def compute_light(m, now):
+    if is_blocked(m, now):
+        return "red"
+    if m["score"] is None:
+        return "gray"
+    if m["score"] < SCORE_THRESHOLD:
+        return "yellow"
+    return "green"
+
+
+def status_text(m, now):
+    if is_blocked(m, now):
+        return "已截斷"
+    if m["score"] is None:
+        return "尚無資料"
+    if m["score"] < SCORE_THRESHOLD:
+        return "異常"
+    return "正常"
 
 
 app = Flask(__name__, static_folder=FRONTEND_DIR, static_url_path="")
@@ -72,15 +79,18 @@ def index():
 
 @app.get("/api/machines")
 def list_machines():
-    with lock:
-        return jsonify([{"id": m["id"], "name": m["name"]} for m in machines.values()])
+    return jsonify([{"id": i, "name": f"機台{i}"} for i in range(1, MACHINE_COUNT + 1)])
 
 
 @app.get("/api/machines/status")
 def machine_status():
+    now = time.time()
     with lock:
         return jsonify(
-            [{"id": m["id"], "name": m["name"], "light": m["light"]} for m in machines.values()]
+            [
+                {"id": m["id"], "name": m["name"], "light": compute_light(m, now), "score": m["score"]}
+                for m in machines.values()
+            ]
         )
 
 
@@ -94,37 +104,95 @@ def select_machine():
     return jsonify({"id": m["id"], "name": m["name"]})
 
 
+@app.post("/api/ingest")
+def ingest():
+    machine_id = IP_MACHINE_MAP.get(request.remote_addr)
+    if machine_id is None:
+        return jsonify({"error": "unknown source ip", "ip": request.remote_addr}), 403
+
+    now = time.time()
+    row = request.get_json(silent=True) or {}
+
+    with lock:
+        m = machines[machine_id]
+
+        if is_blocked(m, now):
+            return jsonify({"machineId": machine_id, "status": "dropped"}), 200
+
+        score = row.get("score")
+        if score is None:
+            score = compute_diagnosis(machine_id, row)
+        score = float(score)
+
+        m["score"] = score
+        m["last_update"] = now
+
+        if score < SCORE_THRESHOLD:
+            if m["abnormal_since"] is None:
+                m["abnormal_since"] = now
+            elif now - m["abnormal_since"] >= ABNORMAL_SUSTAIN_SECONDS:
+                m["blocked_until"] = now + BLOCK_DURATION_SECONDS
+                m["block_history"].insert(0, {"time": now_iso(now), "score": score})
+                del m["block_history"][BLOCK_HISTORY_LIMIT:]
+                m["abnormal_since"] = None
+        else:
+            m["abnormal_since"] = None
+
+    return jsonify({"machineId": machine_id, "status": "ok"}), 200
+
+
 @app.get("/api/machines/<int:machine_id>/diagnosis")
 def diagnosis(machine_id):
+    now = time.time()
     with lock:
         m = machines.get(machine_id)
         if not m:
             return jsonify({"error": "not found"}), 404
-        status = DIAGNOSIS_TEXT[m["light"]]
+
+        blocked = is_blocked(m, now)
+        details = []
+        if m["last_update"] is None:
+            details.append("尚未收到資料")
+        else:
+            details.append(f"最後更新: {datetime.fromtimestamp(m['last_update']).strftime('%H:%M:%S')}")
+        details.append(f"信任分數門檻: {SCORE_THRESHOLD}")
+        if blocked:
+            details.append(f"已截斷，剩餘 {m['blocked_until'] - now:.1f} 秒")
+        elif m["abnormal_since"] is not None:
+            details.append(
+                f"異常持續 {now - m['abnormal_since']:.1f} 秒（達 {ABNORMAL_SUSTAIN_SECONDS} 秒將截斷訊息）"
+            )
+
         return jsonify(
             {
                 "machineId": m["id"],
-                "status": status,
-                "details": [
-                    f"最近心跳: {datetime.now().strftime('%H:%M:%S')}",
-                    f"信心分數: {m['score']:.1f}",
-                    f"狀態持續: {m['duration']} 秒",
-                ],
+                "status": status_text(m, now),
+                "details": details,
                 "score": m["score"],
-                "durationSeconds": m["duration"],
+                "blocked": blocked,
+                "blockedSecondsRemaining": max(0.0, m["blocked_until"] - now) if blocked else 0.0,
             }
         )
 
 
-@app.get("/api/machines/<int:machine_id>/messages")
-def messages(machine_id):
+@app.get("/api/machines/<int:machine_id>/publisher-status")
+def publisher_status(machine_id):
+    now = time.time()
     with lock:
         m = machines.get(machine_id)
         if not m:
             return jsonify({"error": "not found"}), 404
-        return jsonify(list(reversed(m["messages"][-30:])))
+
+        blocked = is_blocked(m, now)
+        return jsonify(
+            {
+                "machineId": m["id"],
+                "blocked": blocked,
+                "blockedSecondsRemaining": max(0.0, m["blocked_until"] - now) if blocked else 0.0,
+                "history": list(m["block_history"]),
+            }
+        )
 
 
 if __name__ == "__main__":
-    threading.Thread(target=tick, daemon=True).start()
     app.run(port=5181, debug=False)
