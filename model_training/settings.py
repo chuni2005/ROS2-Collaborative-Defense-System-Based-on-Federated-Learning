@@ -1,20 +1,20 @@
 import math
 import os
 import sys
-import ctypes
 import subprocess
 import time
 import shutil
-import pandas as pd
+
+from split import SequentialSplit
 
 NUM_CLIENTS = 5
+CHUNK_NUM = NUM_CLIENTS + 1
 NUM_ROUNDS = 10
 TARGET_DATA = "ROSPaCe_complete/ROSPaCe_complete_noperiodicity.csv"
-VALIDATION_DATA = f"split_data/chunk_{NUM_CLIENTS+1}.csv"
+VALIDATION_DATA = f"split_data/chunk_{CHUNK_NUM}.csv"
 
 SPLIT_UNIT = 1200000
 SPLIT_DIR = "split_data"
-SPLIT_RANDOM = True
 
 LOG_DIR = "logs"
 MODEL_DIR = "model"
@@ -47,13 +47,23 @@ class MainRunner(object):
         self.server_proc = None
         self.client_procs = []
         self.round_times = []
-        self.num_row = self.get_data_row_num()
+        self.init()
+        self.splitter = SequentialSplit(
+            src_path=self._resolve_data_path(),
+            tmp_dir=os.path.join(self.base_dir, "tmp"),
+            output_dir=os.path.join(self.base_dir, SPLIT_DIR),
+            chart_dir=os.path.join(self.base_dir, "img"),
+            chunk_size=SPLIT_UNIT // CHUNK_NUM,
+            chunk_num=CHUNK_NUM,
+        )
+        self.num_row = self.splitter.it.row_num
         self.total_rounds = max(1, math.ceil(self.num_row / SPLIT_UNIT))
         self.detect(SPACE_CHECK)
-        self.init()
 
     def __del__(self):
         if hasattr(self, "sys_logger") and self.sys_logger is not None:
+            if self.splitter is not None:
+                self.splitter.cleanup()
             sys.stdout = sys.__stdout__
             sys.stderr = sys.__stderr__
             self.sys_logger.close()
@@ -64,20 +74,7 @@ class MainRunner(object):
 
     def split_data(self):
         print(f"[Info] [{self.head}-{self.head + SPLIT_UNIT}] Splitting Data... [1/3]")
-        with open(os.path.join(self.log_dir, "split.log"), "a", encoding="utf-8") as split_log:
-            subprocess.run(
-                [
-                    sys.executable,
-                    os.path.join(self.base_dir, "split.py"),
-                    f"--target_data={self._resolve_data_path()}",
-                    f"--split_dir={os.path.join(self.base_dir, SPLIT_DIR)}",
-                    f"--unit={SPLIT_UNIT}",
-                    f"--chunk={NUM_CLIENTS + 1}", # one for server validation data 
-                ] + (["--random"] if SPLIT_RANDOM else []),
-                stdout=split_log,
-                stderr=split_log,
-                check=True,
-            )
+        self.splitter.split_to_chunks()
 
     def run_server(self):
         print("[Info] Running Flower Server... [2/3]")
@@ -168,23 +165,9 @@ class MainRunner(object):
             return candidate
         return self._resolve_data_path()
 
-    def get_data_row_num(self):
-        data_path = self._resolve_data_path()
-        if not os.path.exists(data_path):
-            print("[Warning] Bruh your source data file is not found.")
-            sys.exit(1)
-
-        total_rows = 0
-        chunk_size = 50000
-        for chunk in pd.read_csv(data_path, chunksize=chunk_size, usecols=[0]):
-            total_rows += len(chunk)
-        return total_rows
-
     def detect(self, file_check: bool = True):
-        # self.admin_check()
-
-        if SPLIT_UNIT % NUM_CLIENTS != 0:
-            print("[Warning] Bruh your SPLIT_UNIT must be divisible by NUM_CLIENTS!")
+        if SPLIT_UNIT % CHUNK_NUM != 0:
+            print("[Warning] Bruh your SPLIT_UNIT must be divisible by NUM_CLIENTS + 1!")
             sys.exit(1)
 
         if not file_check:
@@ -208,16 +191,6 @@ class MainRunner(object):
         self.sys_logger = SysLogger(os.path.join(self.log_dir, "run.log"))
         sys.stdout = self.sys_logger
         sys.stderr = self.sys_logger
-
-    def admin_check(self):
-        if os.name != "nt":
-            return
-        try:
-            is_admin = ctypes.windll.shell32.IsUserAnAdmin()
-        except Exception:
-            is_admin = False
-        if not is_admin:
-            print("[Warning] Hey, this runner is not running as Administrator. Proceeding without elevation.")
 
     def _format_duration(self, seconds):
         hours = int(seconds // 3600)

@@ -11,11 +11,13 @@ from flwr.server.client_proxy import ClientProxy
 
 
 def convert_type(x):
-    if (isinstance(x, (int, float, np.number)) and not pd.isna(x)) and not isinstance(x, bool):
+    if (isinstance(x, (int, float, np.number)) and not pd.isna(x)) and not isinstance(
+        x, bool
+    ):
         return x
 
-    if pd.isna(x) or x == '':
-        return ''
+    if pd.isna(x) or x == "":
+        return ""
 
     try:
         num = pd.to_numeric(x)
@@ -24,13 +26,13 @@ def convert_type(x):
         try:
             return str(x)
         except Exception:
-            return ''
+            return ""
 
 
 def preprocess_data(df):
-    feature_cols = [col for col in df.columns if col != 'attack']
+    feature_cols = [col for col in df.columns if col != "attack"]
 
-    if hasattr(df, 'map'):
+    if hasattr(df, "map"):
         df[feature_cols] = df[feature_cols].map(convert_type)
     else:
         df[feature_cols] = df[feature_cols].applymap(convert_type)
@@ -39,20 +41,29 @@ def preprocess_data(df):
     df.fillna(-1, inplace=True)
     df = df.dropna(thresh=1, axis=1)
 
-    if 'attack' in df.columns:
+    if "attack" in df.columns:
         attack_mapping = {
-            'observe': 0, 'metasploit SYN flood': 1, 'nmap discovery': 1,
-            'nmap SYN flood': 1, 'ros2 node crashing': 1,
-            'ros2 reconnaissance': 1, 'ros2 reflection': 1
+            "observe": 0,
+            "metasploit SYN flood": 1,
+            "nmap discovery": 1,
+            "nmap SYN flood": 1,
+            "ros2 node crashing": 1,
+            "ros2 reconnaissance": 1,
+            "ros2 reflection": 1,
         }
-        df['attack'] = df['attack'].replace(attack_mapping).infer_objects(copy=False)
-        df['attack'] = pd.to_numeric(df['attack'], errors='coerce').fillna(0).astype(int)
+        df["attack"] = df["attack"].replace(attack_mapping).infer_objects(copy=False)
+        df["attack"] = (
+            pd.to_numeric(df["attack"], errors="coerce").fillna(0).astype(int)
+        )
 
-    df = df.drop(columns=[i for i in df.columns if "Unnamed" in i or "timestamp" in i], errors='ignore')
+    df = df.drop(
+        columns=[i for i in df.columns if "Unnamed" in i or "timestamp" in i],
+        errors="ignore",
+    )
 
-    non_numeric_cols = df.select_dtypes(exclude=[np.number, 'bool']).columns
+    non_numeric_cols = df.select_dtypes(exclude=[np.number, "bool"]).columns
     for col in non_numeric_cols:
-        if col != 'attack':
+        if col != "attack":
             df[col] = pd.Categorical(df[col]).codes
 
     df.columns = [re.sub(r"[\[\]<>]", "_", str(col)) for col in df.columns]
@@ -60,7 +71,9 @@ def preprocess_data(df):
 
 
 class XGBoostStrategy(fl.server.strategy.FedAvg):
-    def __init__(self, model_dir: str, num_clients: int, val_data_path: Optional[str] = None):
+    def __init__(
+        self, model_dir: str, num_clients: int, val_data_path: Optional[str] = None
+    ):
         self.num_clients = num_clients
         self.model_dir = os.path.abspath(model_dir)
         os.makedirs(self.model_dir, exist_ok=True)
@@ -84,9 +97,7 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
             min_available_clients=num_clients,
         )
 
-    def initialize_parameters(
-        self, client_manager
-    ) -> Optional[Parameters]:
+    def initialize_parameters(self, client_manager) -> Optional[Parameters]:
         if os.path.exists(self.latest_model_path):
             with open(self.latest_model_path, "rb") as f:
                 model_bytes = f.read()
@@ -118,7 +129,7 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
             bst = xgb.Booster()
             bst.load_model(bytearray(model_bytes))
             preds = bst.predict(self.dval)
-            
+
             preds_binary = [1 if p > 0.5 else 0 for p in preds]
             correct = sum(1 for p, y in zip(preds_binary, self.y_true) if p == y)
             return correct / len(self.y_true)
@@ -138,7 +149,9 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
             return None, {}
 
         if failures:
-            print(f"[Warning] Round {server_round} had {len(failures)} client failure(s): {failures}")
+            print(
+                f"[Warning] Round {server_round} had {len(failures)} client failure(s): {failures}"
+            )
 
         payloads = []
         for client_proxy, fit_res in results:
@@ -146,22 +159,34 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
             if payload:
                 if self.dval is not None:
                     server_score = self._evaluate_model_on_server(payload)
-                    print(f"[Server Eval] Client {client_proxy.cid} Accuracy: {server_score:.4f}")
+                    print(
+                        f"[Server Eval] Client {client_proxy.cid} Accuracy: {server_score:.4f}"
+                    )
                     payloads.append((payload, server_score, client_proxy.cid))
                 else:
                     metrics = fit_res.metrics or {}
-                    payloads.append((payload, float(metrics.get("accuracy", 0.0)), client_proxy.cid))
+                    payloads.append(
+                        (payload, float(metrics.get("accuracy", 0.0)), client_proxy.cid)
+                    )
 
         best_payload, best_accuracy, best_cid = max(payloads, key=lambda item: item[1])
 
-        model_path = os.path.join(self.model_dir, f"global_model_round_{server_round}.ubj")
-        with open(model_path, "wb") as f: f.write(best_payload)
-        with open(self.latest_model_path, "wb") as f: f.write(best_payload)
+        model_path = os.path.join(
+            self.model_dir, f"global_model_round_{server_round}.ubj"
+        )
+        with open(model_path, "wb") as f:
+            f.write(best_payload)
+        with open(self.latest_model_path, "wb") as f:
+            f.write(best_payload)
 
-        print(f"[Info] Round {server_round} kept the highest-scoring model (accuracy={best_accuracy:.4f}) "
-              f"and saved it to {model_path}")
+        print(
+            f"[Info] Round {server_round} kept the highest-scoring model (accuracy={best_accuracy:.4f}) "
+            f"and saved it to {model_path}"
+        )
 
-        aggregated_parameters = Parameters(tensors=[best_payload], tensor_type="xgboost-ubj")
+        aggregated_parameters = Parameters(
+            tensors=[best_payload], tensor_type="xgboost-ubj"
+        )
         return aggregated_parameters, {"accuracy": best_accuracy}
 
     # def aggregate_evaluate(
@@ -201,18 +226,42 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run a Flower server with XGBoost strategy.")
-    parser.add_argument("--model_dir", type=str, default="./models", help="Directory to save the trained model.")
-    parser.add_argument("--num_rounds", type=int, default=1, help="Number of rounds to train the model.")
-    parser.add_argument("--num_clients", type=int, default=1, help="Number of clients to train the model.")
-    parser.add_argument("--server_address", type=str, default="0.0.0.0:8080", help="Flower server address")
-    parser.add_argument("--validation_data_path", type=str, default="split_data/chunk_0.csv", help="Path to the validation data CSV file.")
+    parser = argparse.ArgumentParser(
+        description="Run a Flower server with XGBoost strategy."
+    )
+    parser.add_argument(
+        "--model_dir",
+        type=str,
+        default="./models",
+        help="Directory to save the trained model.",
+    )
+    parser.add_argument(
+        "--num_rounds", type=int, default=1, help="Number of rounds to train the model."
+    )
+    parser.add_argument(
+        "--num_clients",
+        type=int,
+        default=1,
+        help="Number of clients to train the model.",
+    )
+    parser.add_argument(
+        "--server_address",
+        type=str,
+        default="0.0.0.0:8080",
+        help="Flower server address",
+    )
+    parser.add_argument(
+        "--validation_data_path",
+        type=str,
+        default="split_data/chunk_0.csv",
+        help="Path to the validation data CSV file.",
+    )
     args = parser.parse_args()
 
     strategy = XGBoostStrategy(
         model_dir=args.model_dir,
         num_clients=args.num_clients,
-        val_data_path=args.validation_data_path
+        val_data_path=args.validation_data_path,
     )
 
     print("[Info] Flower Server (XGBoost) is starting...")

@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional, overload
 import tempfile
 import shutil
 import csv
@@ -79,19 +79,17 @@ class SplitBase(ABC):
         total_needed_rows = chunk_num * chunk_size
         total_available_rows = self.it.row_num
 
-        if total_available_rows < total_needed_rows:
-            raise ValueError(
-                f"[Error] Total data rows ({total_available_rows}) are less than "
-                f"requested configuration ({chunk_num} chunks x {chunk_size} = {total_needed_rows} rows)."
-            )
-
         if hard_mode and (total_available_rows % total_needed_rows != 0):
             raise ValueError(
                 f"[Error] Hard mode enabled: Total rows ({total_available_rows}) "
                 f"must be perfectly divisible by requested total split size ({total_needed_rows})."
             )
 
-        return Chunk(chunk_num=chunk_num, chunk_size=chunk_size, chunk_path=[])
+        chunk_path = [
+            (self.output.output_data_dir / Path(f"chunk_{i}.csv"), 0)
+            for i in range(chunk_num)
+        ]
+        return Chunk(chunk_num=chunk_num, chunk_size=chunk_size, chunk_path=chunk_path)
 
     def fresh_index_table(self) -> None:
         self.it = IndexTable(table_path=self.temp.temp_data_path)
@@ -135,14 +133,34 @@ class SplitBase(ABC):
                     )
                 current_offset = f.tell()
 
-    def remove_record_by_index(self, index: int):
+    @overload
+    def remove_record_by_index(self, index: int) -> None: ...
+
+    @overload
+    def remove_record_by_index(self, index: int, count: int) -> None: ...
+
+    def remove_record_by_index(self, index: int, count: Optional[int] = None) -> None:
         original_count = self.it.row_num
-        if 0 <= index < original_count:
-            self.it.records.pop(index)
+
+        if count is not None:
+            if index < 0 or index > original_count:
+                raise IndexError(
+                    f"[Error] Index {index} out of range (amount: {original_count})."
+                )
+            if count < 0:
+                raise IndexError("[Error] count must not be negative.")
+
+            actual_count = min(count, original_count - index)
+            end_index = index + actual_count
+
+            del self.it.records[index:end_index]
+
         else:
-            raise IndexError(
-                f"[Error] Index {index} out of range (amount: {original_count})."
-            )
+            if index < 0 or index >= original_count:
+                raise IndexError(
+                    f"[Error] Index {index} out of range (amount: {original_count})."
+                )
+            self.it.records.pop(index)
 
     def rewrite_to_temp(self) -> Path:
         temp_file_path = self.temp.temp_data_path
@@ -190,3 +208,18 @@ class SplitBase(ABC):
     @abstractmethod
     def split_to_chunks(self) -> List[Tuple[Path, int]]:
         pass
+
+    def distribute_chunk_size(self) -> None:
+        total_needed = self.chunk.chunk_size * self.chunk.chunk_num
+        unit_size = self.chunk.chunk_size
+        remain = 0
+
+        if self.it.row_num < total_needed:
+            unit_size = self.it.row_num // self.chunk.chunk_num
+            remain = self.it.row_num % self.chunk.chunk_num
+
+        self.chunk.chunk_path = [(path, unit_size) for path, _ in self.chunk.chunk_path]
+
+        if remain and self.chunk.chunk_path:
+            last_path, last_size = self.chunk.chunk_path[-1]
+            self.chunk.chunk_path[-1] = (last_path, last_size + remain)
