@@ -24,5 +24,5 @@ class SequentialSplit(SplitBase):
                 self.remove_record_by_index(0, chunk_size)
                 records = self.it.records
 
-            self.rewrite_to_temp()
-            return self.chunk.chunk_path
+        self.rewrite_to_temp()
+        return self.chunk.chunk_path

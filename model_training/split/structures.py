@@ -29,11 +29,6 @@ class Chunk:
 
 
 @dataclass
-class SourceData:
-    source_data_path: Path
-
-
-@dataclass
 class TempData:
     temp_data_path: Path
 

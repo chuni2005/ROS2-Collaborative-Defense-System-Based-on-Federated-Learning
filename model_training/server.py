@@ -253,7 +253,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--validation_data_path",
         type=str,
-        default="split_data/chunk_0.csv",
+        default="split-data/chunk_0.csv",
         help="Path to the validation data CSV file.",
     )
     args = parser.parse_args()

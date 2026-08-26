@@ -10,11 +10,11 @@ from split import SequentialSplit
 NUM_CLIENTS = 5
 CHUNK_NUM = NUM_CLIENTS + 1
 NUM_ROUNDS = 10
-TARGET_DATA = "ROSPaCe_complete/ROSPaCe_complete_noperiodicity.csv"
-VALIDATION_DATA = f"split_data/chunk_{CHUNK_NUM}.csv"
+TARGET_DATA = "../ROSPaCe_complete/ROSPaCe_complete_noperiodicity.csv"
+VALIDATION_DATA = f"split-data/chunk_{CHUNK_NUM}.csv"
 
 SPLIT_UNIT = 1200000
-SPLIT_DIR = "split_data"
+SPLIT_DIR = "split-data"
 
 LOG_DIR = "logs"
 MODEL_DIR = "model"
