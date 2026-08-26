@@ -6,4 +6,5 @@ split_data
 model
 output_models
 dataset/*
+FDO/*
 !.gitkeep
