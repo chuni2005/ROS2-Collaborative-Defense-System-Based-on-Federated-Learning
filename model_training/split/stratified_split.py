@@ -12,6 +12,8 @@ class StratifiedSplit(SplitBase):
         super().__init__(*args, **kwargs)
         self.random = random.Random(random_seed)
 
+    # def distribute_chunk_size():
+
     def split_to_chunks(self) -> List[Tuple[Path, int]]:
         self.distribute_chunk_size()
         chunk_sizes = [size for _, size in self.chunk.chunk_path]
@@ -39,7 +41,6 @@ class StratifiedSplit(SplitBase):
             for record in self.it.records
             if record.offset not in selected_offsets
         ]
-        self.rewrite_to_temp()
         return self.chunk.chunk_path
 
     def _select_records(self, chunk_sizes: List[int]) -> List[List[RowRecord]]:
@@ -50,61 +51,61 @@ class StratifiedSplit(SplitBase):
         for records in records_by_label.values():
             self.random.shuffle(records)
 
-        total_to_select = sum(chunk_sizes)
-        label_counts = self._allocate_counts(
-            total_to_select,
-            {label: len(records) for label, records in records_by_label.items()},
-        )
-        selected_by_label = {
-            label: records[:count]
-            for label, records in records_by_label.items()
-            for count in [label_counts[label]]
-        }
-
         chunks: List[List[RowRecord]] = [[] for _ in chunk_sizes]
-        for label, records in selected_by_label.items():
-            for record in records:
-                available_chunks = [
-                    index
-                    for index, chunk in enumerate(chunks)
-                    if len(chunk) < chunk_sizes[index]
-                ]
-                target = self.random.choice(available_chunks)
-                chunks[target].append(record)
+        labels = sorted(records_by_label)
+        if not labels:
+            return chunks
+
+        target_counts = self._target_counts(chunk_sizes, labels)
+        for index, target in enumerate(target_counts):
+            dominant = labels[index % len(labels)]
+            self._take_records(
+                chunks[index], records_by_label[dominant], target[dominant]
+            )
+
+        for index, target in enumerate(target_counts):
+            for label, count in target.items():
+                if label != labels[index % len(labels)]:
+                    self._take_records(chunks[index], records_by_label[label], count)
+
+        leftovers = [
+            record
+            for records in records_by_label.values()
+            for record in records
+        ]
+        self.random.shuffle(leftovers)
+        for index, chunk in enumerate(chunks):
+            missing = chunk_sizes[index] - len(chunk)
+            chunk.extend(leftovers[:missing])
+            del leftovers[:missing]
 
         for chunk in chunks:
             self.random.shuffle(chunk)
         return chunks
 
+    def _target_counts(
+        self, chunk_sizes: List[int], labels: List[str]
+    ) -> List[Dict[str, int]]:
+        targets = []
+        for index, chunk_size in enumerate(chunk_sizes):
+            dominant = labels[index % len(labels)]
+            dominant_count = min(chunk_size, int(chunk_size * 0.8 + 0.5))
+            other_total = chunk_size - dominant_count
+            others = [label for label in labels if label != dominant]
+            counts = {label: 0 for label in labels}
+            counts[dominant] = dominant_count
+
+            if others:
+                base, extra = divmod(other_total, len(others))
+                for other_index, label in enumerate(others):
+                    counts[label] = base + (other_index < extra)
+            targets.append(counts)
+        return targets
+
     @staticmethod
-    def _allocate_counts(total: int, available: Dict[str, int]) -> Dict[str, int]:
-        if not available or total <= 0:
-            return {label: 0 for label in available}
-
-        total_available = sum(available.values())
-        total = min(total, total_available)
-        exact = {
-            label: total * count / total_available for label, count in available.items()
-        }
-        allocation = {
-            label: min(available[label], int(value)) for label, value in exact.items()
-        }
-
-        remaining = total - sum(allocation.values())
-        labels = sorted(
-            available,
-            key=lambda label: exact[label] - allocation[label],
-            reverse=True,
-        )
-        while remaining:
-            changed = False
-            for label in labels:
-                if allocation[label] < available[label]:
-                    allocation[label] += 1
-                    remaining -= 1
-                    changed = True
-                    if not remaining:
-                        break
-            if not changed:
-                break
-        return allocation
+    def _take_records(
+        chunk: List[RowRecord], available: List[RowRecord], count: int
+    ) -> None:
+        taken = min(count, len(available))
+        chunk.extend(available[:taken])
+        del available[:taken]
