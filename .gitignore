@@ -1,5 +1,7 @@
 __pycache__
 ROSPaCe_complete
+ROSPaCe_reduced*
+*.tar.gz
 logs
 tmp
 split_data
