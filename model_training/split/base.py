@@ -154,6 +154,7 @@ class SplitBase(ABC):
             end_index = index + actual_count
 
             del self.it.records[index:end_index]
+            self.it.row_num -= actual_count
 
         else:
             if index < 0 or index >= original_count:
@@ -161,6 +162,7 @@ class SplitBase(ABC):
                     f"[Error] Index {index} out of range (amount: {original_count})."
                 )
             self.it.records.pop(index)
+            self.it.row_num -= 1
 
     def cleanup(self) -> None:
         try:

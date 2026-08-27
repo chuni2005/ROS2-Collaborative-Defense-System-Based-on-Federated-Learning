@@ -1,10 +1,13 @@
-from collections import defaultdict
+from collections import Counter
 from pathlib import Path
 import random
 from typing import Dict, List, Tuple
+import pickle
+from pathlib import Path
+import csv
 
 from .base import SplitBase
-from .structures import RowRecord
+from .structures import IndexTable, RowRecord
 
 
 class StratifiedSplit(SplitBase):
@@ -12,100 +15,92 @@ class StratifiedSplit(SplitBase):
         super().__init__(*args, **kwargs)
         self.random = random.Random(random_seed)
 
-    # def distribute_chunk_size():
+    def distribute_chunk_size(self):
+        if self.it.row_num == 0:
+            raise Exception(f"[Early Stop] index table is not enough！")
 
-    def split_to_chunks(self) -> List[Tuple[Path, int]]:
-        self.distribute_chunk_size()
-        chunk_sizes = [size for _, size in self.chunk.chunk_path]
-        selected_by_chunk = self._select_records(chunk_sizes)
-        selected_offsets = set()
+        attacks_in_chunk = [rec.attack for rec in self.it.records]
+        attack_labels = set(attacks_in_chunk)
+        attacks_count = len(attack_labels)
 
-        with open(self.temp.temp_data_path, "rb") as infile:
-            for (chunk_file, chunk_size), records in zip(
-                self.chunk.chunk_path, selected_by_chunk
-            ):
-                if len(records) != chunk_size:
-                    raise RuntimeError(
-                        "Stratified sampling produced an invalid chunk size."
-                    )
+        # main_size = self.chunk.size // 10 * 8
+        # in_other_size = self.chunk.size // 10 * 2  # total
+        # every_chunk_size = main_size + in_other_size
+        every_chunk_size = self.chunk.size
+        
+        for label in attack_labels:
+            if every_chunk_size > attacks_in_chunk.count(label) or attacks_count<=1:
+                raise Exception(f"[Early Stop] index table is not enough！")
 
-                with open(chunk_file, "wb") as outfile:
-                    outfile.write(self.it.header_bytes)
-                    for record in records:
-                        infile.seek(record.offset)
-                        outfile.write(infile.read(record.length))
-                        selected_offsets.add(record.offset)
-
-        self.it.records = [
-            record
-            for record in self.it.records
-            if record.offset not in selected_offsets
+        self.chunk.chunk_path = [
+            (path, every_chunk_size) for path, _ in self.chunk.chunk_path
         ]
-        return self.chunk.chunk_path
+        print(f"[Info] set chunk size succesfull.")
+    
+    def split_to_chunks(self):
+        self.distribute_chunk_size()
 
-    def _select_records(self, chunk_sizes: List[int]) -> List[List[RowRecord]]:
-        records_by_label: Dict[str, List[RowRecord]] = defaultdict(list)
-        for record in self.it.records:
-            records_by_label[record.attack].append(record)
+        record_pools = {}
+        for rec in self.it.records:
+            if rec.attack not in record_pools:
+                record_pools[rec.attack] = []
+            record_pools[rec.attack].append(rec)
+        attack_labels = list(record_pools.keys())
+        
+        final_chunks = []
+        for i, (path, size) in enumerate(self.chunk.chunk_path):
+            main_needed = (size // 10) * 8
+            other_needed = (size // 10) * 2
+            main_label = attack_labels[i % len(attack_labels)]
+            
+            chunk_records = []
+            main_records = record_pools[main_label][:main_needed]
+            chunk_records.extend(main_records)
+            del record_pools[main_label][:main_needed]
 
-        for records in records_by_label.values():
-            self.random.shuffle(records)
+            other_labels = [lbl for lbl in attack_labels if lbl != main_label]
+            per_other_needed = other_needed // len(other_labels)
 
-        chunks: List[List[RowRecord]] = [[] for _ in chunk_sizes]
-        labels = sorted(records_by_label)
-        if not labels:
-            return chunks
+            for o_lbl in other_labels:
+                other_records = record_pools[o_lbl][:per_other_needed]
+                chunk_records.extend(other_records)
+                del record_pools[o_lbl][:per_other_needed]
 
-        target_counts = self._target_counts(chunk_sizes, labels)
-        for index, target in enumerate(target_counts):
-            dominant = labels[index % len(labels)]
-            self._take_records(
-                chunks[index], records_by_label[dominant], target[dominant]
+            new_chunk_table = IndexTable(
+                table_path=path,
+                header_bytes=self.it.header_bytes,
+                records=chunk_records
+            )
+            
+            # refresh index table records
+            self.it.records = []
+            for lbl in attack_labels:
+                self.it.records.extend(record_pools[lbl])
+            
+            self._write_table_to_csv(path, new_chunk_table)
+            print(f"[Info] Chunk {i} ({main_label} attack label) split finish in {path} with {len(chunk_records)} rows data.")
+
+    def _write_table_to_csv(self, path: Path, table: IndexTable) -> None:
+        try:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            source_data_path = Path(self.temp.temp_data_path)
+
+            with (
+                open(source_data_path, "rb") as src_f,
+                open(path, "wb") as tgt_f,
+            ):
+                tgt_f.write(self.it.header_bytes)
+
+                for rec in table.records:
+                    src_f.seek(rec.offset)
+                    raw_line_bytes = src_f.read(rec.length)
+                    tgt_f.write(raw_line_bytes)
+
+            print(
+                f"[Info] Success for turn table to {path}."
             )
 
-        for index, target in enumerate(target_counts):
-            for label, count in target.items():
-                if label != labels[index % len(labels)]:
-                    self._take_records(chunks[index], records_by_label[label], count)
-
-        leftovers = [
-            record
-            for records in records_by_label.values()
-            for record in records
-        ]
-        self.random.shuffle(leftovers)
-        for index, chunk in enumerate(chunks):
-            missing = chunk_sizes[index] - len(chunk)
-            chunk.extend(leftovers[:missing])
-            del leftovers[:missing]
-
-        for chunk in chunks:
-            self.random.shuffle(chunk)
-        return chunks
-
-    def _target_counts(
-        self, chunk_sizes: List[int], labels: List[str]
-    ) -> List[Dict[str, int]]:
-        targets = []
-        for index, chunk_size in enumerate(chunk_sizes):
-            dominant = labels[index % len(labels)]
-            dominant_count = min(chunk_size, int(chunk_size * 0.8 + 0.5))
-            other_total = chunk_size - dominant_count
-            others = [label for label in labels if label != dominant]
-            counts = {label: 0 for label in labels}
-            counts[dominant] = dominant_count
-
-            if others:
-                base, extra = divmod(other_total, len(others))
-                for other_index, label in enumerate(others):
-                    counts[label] = base + (other_index < extra)
-            targets.append(counts)
-        return targets
-
-    @staticmethod
-    def _take_records(
-        chunk: List[RowRecord], available: List[RowRecord], count: int
-    ) -> None:
-        taken = min(count, len(available))
-        chunk.extend(available[:taken])
-        del available[:taken]
+        except Exception as e:
+            raise IOError(
+                f"[Error] Failed to write index table to CSV at {path}. Reason: {str(e)}"
+            )
