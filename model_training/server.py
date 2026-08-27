@@ -206,7 +206,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_rounds", type=int, default=1, help="Number of rounds to train the model.")
     parser.add_argument("--num_clients", type=int, default=1, help="Number of clients to train the model.")
     parser.add_argument("--server_address", type=str, default="0.0.0.0:8080", help="Flower server address")
-    parser.add_argument("--validation_data_path", type=str, default="split_data/chunk_0.csv", help="Path to the validation data CSV file.")
+    parser.add_argument("--validation_data_path", type=str, default="split_data/chunk_6.csv", help="Path to the validation data CSV file.")
     args = parser.parse_args()
 
     strategy = XGBoostStrategy(
