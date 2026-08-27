@@ -9,7 +9,7 @@ import pandas as pd
 
 NUM_CLIENTS = 5
 NUM_ROUNDS = 10
-TARGET_DATA = "ROSPaCe_complete/ROSPaCe_complete_noperiodicity.csv"
+TARGET_DATA = "ROSPaCe_reduced/ROSPaCe_reduced_merged.csv"
 VALIDATION_DATA = f"split_data/chunk_{NUM_CLIENTS+1}.csv"
 
 SPLIT_UNIT = 1200000
