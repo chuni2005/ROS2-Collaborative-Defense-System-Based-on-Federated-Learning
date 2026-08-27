@@ -25,6 +25,8 @@ import traceback
 
 
 TENSOR_TYPE = "xgboost-ubj"
+NUM_BOOST_ROUND = 10  # trees added per federated round; also used to slice
+                      # out "this round's new trees" in bagging mode.
 
 # Positive class for precision/recall/F1 is 1 ("attack") -- must match
 # server.py's POSITIVE_CLASS. See notes/11-dataset-check.md.
@@ -133,8 +135,9 @@ def load_local_data(client_id, data_path, eval_data_path=None):
 
 class XGBoostClient(fl.client.Client):
 
-    def __init__(self, client_id, data_path, eval_data_path=None):
+    def __init__(self, client_id, data_path, eval_data_path=None, aggregation="winner"):
         self.client_id = client_id
+        self.aggregation = aggregation
 
         self.dtrain, self.dval, self.dtest_local, self.deval_ext, self.y_ext, \
             self.num_train, self.num_test, self.y_test_local = \
@@ -220,6 +223,34 @@ class XGBoostClient(fl.client.Client):
         tensors = [model_bytes] if model_bytes else []
         return Parameters(tensors=tensors, tensor_type=TENSOR_TYPE)
 
+    # Bagging mode only: send just this round's newly-added trees, not the
+    # whole cumulative model. Required for server-side bagging aggregation
+    # to work correctly -- see notes/00-findings.md finding 21 and
+    # notes/13a-bagging-baseline.md for why sending the whole model breaks
+    # Flower's aggregate(). Slicing by num_boosted_rounds() is the same
+    # technique Flower's own bagging example uses (client_app.py's
+    # _local_boost()), verified empirically to correctly isolate the delta
+    # even when continuing from a previous round's model (xgb_model=...).
+    def _parameters_from_new_trees(self) -> Parameters:
+        if self.bst is None:
+            return Parameters(tensors=[], tensor_type=TENSOR_TYPE)
+
+        total_rounds = self.bst.num_boosted_rounds()
+        new_trees_bst = self.bst[total_rounds - NUM_BOOST_ROUND : total_rounds]
+
+        tmp_file = None
+        try:
+            with tempfile.NamedTemporaryFile("wb", suffix=".ubj", delete=False) as tmp:
+                tmp_file = tmp.name
+            new_trees_bst.save_model(tmp_file)
+            with open(tmp_file, "rb") as handle:
+                model_bytes = handle.read()
+        finally:
+            if tmp_file and os.path.exists(tmp_file):
+                os.remove(tmp_file)
+
+        return Parameters(tensors=[model_bytes] if model_bytes else [], tensor_type=TENSOR_TYPE)
+
     # Verified against real data in notes/12-baseline.md.
     def _evaluate_global_on_local_test(self):
         print("[Info-Test] Server global model - local test")
@@ -293,7 +324,7 @@ class XGBoostClient(fl.client.Client):
 
         print(f"[Info] [Client {self.client_id}] Training...")
         self.bst = xgb.train(
-            self.params, self.dtrain, num_boost_round=10,
+            self.params, self.dtrain, num_boost_round=NUM_BOOST_ROUND,
             evals=[(self.dtrain, "train"), (self.dval, "val")],
             xgb_model=self.bst, verbose_eval=False
         )
@@ -301,9 +332,17 @@ class XGBoostClient(fl.client.Client):
         local_metrics = self._evaluate_local_test()
         self._save_model_artifact()
 
+        # winner mode sends the whole cumulative model (server picks one
+        # winner's full model as next round's starting point). bagging mode
+        # sends only this round's new trees -- see _parameters_from_new_trees.
+        if self.aggregation == "bagging":
+            fit_parameters = self._parameters_from_new_trees()
+        else:
+            fit_parameters = self._parameters_from_booster()
+
         return FitRes(
             status=Status(code=Code.OK, message="Success"),
-            parameters=self._parameters_from_booster(),
+            parameters=fit_parameters,
             num_examples=self.num_train,
             metrics={
                 "client_id": self.client_id,
@@ -347,10 +386,13 @@ if __name__ == "__main__":
     parser.add_argument("--cid", "--client_id", type=int, required=True, dest="client_id", help="Client ID")
     parser.add_argument("--data_path", type=str, required=True, help="Local training data CSV path")
     parser.add_argument("--server_address", type=str, default=os.environ.get("SERVER_ADDRESS", "127.0.0.1:8080"), help="Flower server address")
+    parser.add_argument("--aggregation", type=str, default="winner", choices=["winner", "bagging"],
+                        help="Must match the server's --aggregation. winner = send the whole cumulative "
+                             "model each round (default). bagging = send only this round's new trees.")
     args = parser.parse_args()
 
     print(f"Flower Client {args.client_id} running ...")
     fl.client.start_client(
         server_address=args.server_address,
-        client=XGBoostClient(args.client_id, args.data_path)
+        client=XGBoostClient(args.client_id, args.data_path, aggregation=args.aggregation)
     )

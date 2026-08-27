@@ -9,6 +9,7 @@ import flwr as fl
 from flwr.common import FitRes, Parameters, Scalar
 from flwr.server.client_proxy import ClientProxy
 from sklearn.metrics import precision_score, recall_score, f1_score
+import json
 
 # Positive class for precision/recall/F1 is 1 ("attack") -- ROSPaCe's attack
 # samples are the MAJORITY class (~78%), the reverse of typical IDS datasets.
@@ -65,6 +66,55 @@ def preprocess_data(df):
 
     df.columns = [re.sub(r"[\[\]<>]", "_", str(col)) for col in df.columns]
     return df.astype(np.float32)
+
+
+def aggregate_bagging_verified(bst_prev_org: Optional[bytes], bst_curr_org: bytes) -> bytes:
+    """Bagging aggregation: append the trees in bst_curr_org to bst_prev_org.
+
+    This is derived from Flower's official aggregate()
+    (flwr/server/strategy/fedxgb_bagging.py:118-154) but fixes one thing:
+    the official version decides how many trees to append by reading
+    gbtree_model_param.num_parallel_tree from bst_curr_org -- a fixed
+    XGBoost hyperparameter (how many trees to train in parallel per
+    boosting iteration, normally 1), NOT "how many new trees this
+    submission contains". It only happens to give the right answer when a
+    client trains exactly num_parallel_tree (=1) new tree per round, which
+    is what Flower's own bagging example does (local-epochs=1). Our
+    client.py trains NUM_BOOST_ROUND=10 trees per round, so that field is
+    always 1 regardless of the true delta size -- using it silently
+    merged the same stale first tree every round instead of each round's
+    actual new trees. See notes/00-findings.md finding 21 and
+    notes/13a-bagging-baseline.md for how this was found.
+
+    Fix: don't read any declared/self-reported count. client.py now sends
+    ONLY this round's new trees (see _parameters_from_new_trees in
+    client.py), so the number to append is simply
+    len(trees in bst_curr_org) -- counted directly from the payload
+    actually received, not trusted from any field a client could
+    misreport. This is the same "don't trust a node's own claim, verify
+    the payload itself" principle as the fallback removed in ff82d04.
+    """
+    if not bst_prev_org:
+        return bst_curr_org
+
+    bst_prev = json.loads(bytearray(bst_prev_org))
+    bst_curr = json.loads(bytearray(bst_curr_org))
+
+    gbtree_prev = bst_prev["learner"]["gradient_booster"]["model"]
+    trees_curr = bst_curr["learner"]["gradient_booster"]["model"]["trees"]
+    tree_num_prev = int(gbtree_prev["gbtree_model_param"]["num_trees"])
+    num_new_trees = len(trees_curr)
+
+    gbtree_prev["gbtree_model_param"]["num_trees"] = str(tree_num_prev + num_new_trees)
+    iteration_indptr = gbtree_prev["iteration_indptr"]
+    iteration_indptr.append(iteration_indptr[-1] + num_new_trees)
+
+    for tree_count in range(num_new_trees):
+        trees_curr[tree_count]["id"] = tree_num_prev + tree_count
+        gbtree_prev["trees"].append(trees_curr[tree_count])
+        gbtree_prev["tree_info"].append(0)
+
+    return bytes(json.dumps(bst_prev), "utf-8")
 
 
 class XGBoostStrategy(fl.server.strategy.FedAvg):
@@ -212,6 +262,123 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
             "f1": best_metrics["f1"],
         }
 
+
+class XGBoostBaggingStrategy(XGBoostStrategy):
+    """Bagging aggregation baseline for notes/13a-bagging-baseline.md.
+
+    aggregate_fit() concatenates every client's new trees into the running
+    global model each round -- no client is ever discarded, unlike
+    XGBoostStrategy's max() which keeps only one winner.
+
+    Two things had to be fixed relative to a first attempt that just used
+    Flower's official aggregate() directly (see notes/00-findings.md
+    finding 21, notes/13a-bagging-baseline.md for the full investigation):
+
+    1. Merge logic: Flower's official aggregate() decides how many trees
+       to append by reading gbtree_model_param.num_parallel_tree -- a fixed
+       XGBoost hyperparameter (normally 1), not "how many new trees this
+       submission has". With this project's NUM_BOOST_ROUND=10, that field
+       is always 1 regardless of true delta size, so it silently merged
+       the same stale first tree every round. aggregate_bagging_verified()
+       (above) fixes this by counting len(trees) in the actual payload
+       instead -- ground truth from the payload's own structure, never
+       trusted from any client-declared value or hyperparameter that
+       doesn't reflect it.
+    2. Wire format: client.py now sends only this round's new trees (see
+       _parameters_from_new_trees), not the whole cumulative model --
+       required for (1) to have a well-defined "how many new trees" to
+       count in the first place.
+
+    Flower's aggregate() parses model bytes with json.loads(), so bagging
+    needs JSON, not the UBJ bytes this project's tensor_type="xgboost-ubj"
+    actually transmits. Verified empirically that loading UBJ bytes into a
+    Booster and re-serializing via save_raw("json") converts correctly,
+    and converting the merged JSON result back via save_raw("ubj")
+    round-trips losslessly (predictions identical) -- confirmed with a
+    synthetic model before relying on it here. The round-trip back to UBJ
+    is necessary because client.py's _load_model_from_bytes() loads by
+    file path with a ".ubj" suffix, and xgboost's load_model(path) trusts
+    the extension -- JSON content in a ".ubj"-named file fails to load
+    (tested directly: json.cc parse error), so the wire format must stay
+    real UBJ.
+    """
+
+    def __init__(self, model_dir: str, num_clients: int, val_data_path: Optional[str] = None):
+        super().__init__(model_dir, num_clients, val_data_path)
+        self.global_model_json: Optional[bytes] = None
+
+    def aggregate_fit(
+        self,
+        server_round: int,
+        results: List[Tuple[ClientProxy, FitRes]],
+        failures: List[BaseException],
+    ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
+
+        if not results:
+            print(f"[Warning] Round {server_round} has no fit results to aggregate.")
+            return None, {}
+
+        if failures:
+            print(f"[Warning] Round {server_round} had {len(failures)} client failure(s): {failures}")
+
+        # Each client now sends ONLY this round's new trees (see
+        # client.py's _parameters_from_new_trees), so the payload here is
+        # NOT a full model -- evaluating it against chunk_6 in isolation
+        # would not mean "this client's model quality" (a lone tree slice's
+        # raw output isn't a meaningful probability without the rest of the
+        # ensemble it was boosted on top of), so that per-client eval step
+        # from the winner-take-all strategy is intentionally dropped here.
+        # What's logged instead is the tree count actually found in each
+        # payload -- counted from the payload itself, never from anything
+        # a client declares -- so a mismatch (e.g. a client sending more or
+        # fewer trees than expected) is visible in the log.
+        merged_json = self.global_model_json
+        for client_proxy, fit_res in results:
+            payload = self._extract_payload(fit_res.parameters)
+            if not payload:
+                continue
+            reported_client_id = (fit_res.metrics or {}).get("client_id", "?")
+
+            bst = xgb.Booster()
+            bst.load_model(bytearray(payload))
+            payload_json = bst.save_raw("json")
+            num_trees_received = len(json.loads(bytearray(payload_json))
+                                      ["learner"]["gradient_booster"]["model"]["trees"])
+            print(
+                f"[Bagging] Client {client_proxy.cid} (client_id={reported_client_id}) "
+                f"sent {num_trees_received} tree(s) this round."
+            )
+
+            merged_json = aggregate_bagging_verified(merged_json, payload_json)
+
+        self.global_model_json = merged_json
+
+        # Convert the merged model back to real UBJ bytes for wire
+        # transmission -- see class docstring for why this round-trip
+        # is required rather than optional.
+        bst_merged = xgb.Booster()
+        bst_merged.load_model(bytearray(merged_json))
+        merged_ubj = bytes(bst_merged.save_raw("ubj"))
+
+        merged_metrics = self._evaluate_model_on_server(merged_ubj)
+
+        model_path = os.path.join(self.model_dir, f"global_model_round_{server_round}.ubj")
+        with open(model_path, "wb") as f: f.write(merged_ubj)
+        with open(self.latest_model_path, "wb") as f: f.write(merged_ubj)
+
+        print(f"[Info] Round {server_round} bagging-merged {len(results)} client models "
+              f"(accuracy={merged_metrics['accuracy']:.4f}, f1={merged_metrics['f1']:.4f}) "
+              f"and saved it to {model_path}")
+
+        aggregated_parameters = Parameters(tensors=[merged_ubj], tensor_type="xgboost-ubj")
+        return aggregated_parameters, {
+            "accuracy": merged_metrics["accuracy"],
+            "precision": merged_metrics["precision"],
+            "recall": merged_metrics["recall"],
+            "f1": merged_metrics["f1"],
+        }
+
+
     # def aggregate_evaluate(
     #     self,
     #     server_round: int,
@@ -255,9 +422,13 @@ if __name__ == "__main__":
     parser.add_argument("--num_clients", type=int, default=1, help="Number of clients to train the model.")
     parser.add_argument("--server_address", type=str, default="0.0.0.0:8080", help="Flower server address")
     parser.add_argument("--validation_data_path", type=str, default="split_data/chunk_6.csv", help="Path to the validation data CSV file.")
+    parser.add_argument("--aggregation", type=str, default="winner", choices=["winner", "bagging"],
+                        help="winner = max() picks the single highest-F1 client model each round (default, existing behavior). "
+                             "bagging = Flower's official bagging aggregate() concatenates every client's trees, none discarded.")
     args = parser.parse_args()
 
-    strategy = XGBoostStrategy(
+    strategy_cls = XGBoostBaggingStrategy if args.aggregation == "bagging" else XGBoostStrategy
+    strategy = strategy_cls(
         model_dir=args.model_dir,
         num_clients=args.num_clients,
         val_data_path=args.validation_data_path
