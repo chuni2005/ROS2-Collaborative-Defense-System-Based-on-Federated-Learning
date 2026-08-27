@@ -66,15 +66,20 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
         os.makedirs(self.model_dir, exist_ok=True)
         self.latest_model_path = os.path.join(self.model_dir, "global_model_latest.ubj")
 
-        self.dval = None
-        if val_data_path and os.path.exists(val_data_path):
-            print(f"[Info] Loading server-side validation data from {val_data_path}...")
-            df_val = pd.read_csv(val_data_path)
-            df_val = preprocess_data(df_val)
-            X_val = df_val.iloc[:, :-1]
-            y_val = df_val.iloc[:, -1]
-            self.dval = xgb.DMatrix(X_val, label=y_val)
-            self.y_true = y_val.values
+        if not val_data_path or not os.path.exists(val_data_path):
+            raise FileNotFoundError(
+                f"Server-side validation data not found at {val_data_path!r}. "
+                "Refusing to start: this system does not fall back to trusting "
+                "client-reported metrics for model selection."
+            )
+
+        print(f"[Info] Loading server-side validation data from {val_data_path}...")
+        df_val = pd.read_csv(val_data_path)
+        df_val = preprocess_data(df_val)
+        X_val = df_val.iloc[:, :-1]
+        y_val = df_val.iloc[:, -1]
+        self.dval = xgb.DMatrix(X_val, label=y_val)
+        self.y_true = y_val.values
 
         super().__init__(
             fraction_fit=1.0,
@@ -144,13 +149,9 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
         for client_proxy, fit_res in results:
             payload = self._extract_payload(fit_res.parameters)
             if payload:
-                if self.dval is not None:
-                    server_score = self._evaluate_model_on_server(payload)
-                    print(f"[Server Eval] Client {client_proxy.cid} Accuracy: {server_score:.4f}")
-                    payloads.append((payload, server_score, client_proxy.cid))
-                else:
-                    metrics = fit_res.metrics or {}
-                    payloads.append((payload, float(metrics.get("accuracy", 0.0)), client_proxy.cid))
+                server_score = self._evaluate_model_on_server(payload)
+                print(f"[Server Eval] Client {client_proxy.cid} Accuracy: {server_score:.4f}")
+                payloads.append((payload, server_score, client_proxy.cid))
 
         best_payload, best_accuracy, best_cid = max(payloads, key=lambda item: item[1])
 
