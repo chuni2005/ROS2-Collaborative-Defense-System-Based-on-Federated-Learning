@@ -6,4 +6,5 @@ logs
 tmp
 split_data
 model
+model_baseline
 output_models
