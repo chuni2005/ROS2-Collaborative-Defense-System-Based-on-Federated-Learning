@@ -5,7 +5,7 @@ import xgboost as xgb
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from flwr.common import (
     Code,
     EvaluateIns,
@@ -25,6 +25,10 @@ import traceback
 
 
 TENSOR_TYPE = "xgboost-ubj"
+
+# Positive class for precision/recall/F1 is 1 ("attack") -- must match
+# server.py's POSITIVE_CLASS. See notes/11-dataset-check.md.
+POSITIVE_CLASS = 1
 
 
 def convert_type(x):
@@ -216,6 +220,7 @@ class XGBoostClient(fl.client.Client):
         tensors = [model_bytes] if model_bytes else []
         return Parameters(tensors=tensors, tensor_type=TENSOR_TYPE)
 
+    # Verified against real data in notes/12-baseline.md.
     def _evaluate_global_on_local_test(self):
         print("[Info-Test] Server global model - local test")
         if self.bst is None:
@@ -226,20 +231,32 @@ class XGBoostClient(fl.client.Client):
             preds_prob = self.bst.predict(self.dtest_local)
             preds = (preds_prob > 0.5).astype(int)
             acc = accuracy_score(self.y_test_local, preds)
-            print(f">>> [Info-Test] Accuracy: {acc:.4f}")
+            precision = precision_score(self.y_test_local, preds, pos_label=POSITIVE_CLASS, zero_division=0)
+            recall = recall_score(self.y_test_local, preds, pos_label=POSITIVE_CLASS, zero_division=0)
+            f1 = f1_score(self.y_test_local, preds, pos_label=POSITIVE_CLASS, zero_division=0)
+            print(f">>> [Info-Test] Accuracy: {acc:.4f} Precision: {precision:.4f} Recall: {recall:.4f} F1: {f1:.4f}")
         except Exception as e:
             print(f"[Warning] Global model evaluation failed: {e}")
 
+    # Verified against real data in notes/12-baseline.md.
+    # zero_division=0: precision/recall/F1 come back as 0.0 rather than
+    # raising or warning when a client's local test split (test_size=0.2 of
+    # its own chunk) happens to contain only one label -- not exercised
+    # against real data yet, so this default hasn't been checked against
+    # what our actual chunk sizes produce.
     def _evaluate_local_test(self):
         print("[Info-Test] Client local model - local test")
         if self.bst is None:
             print("[Warning] Local model is None, skipping evaluation on local test set.")
-            return 1.0, 0.0
+            return {"logloss": 1.0, "accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0}
 
         try:
             preds_prob = self.bst.predict(self.dtest_local)
             preds = (preds_prob > 0.5).astype(int)
             accuracy = float(accuracy_score(self.y_test_local, preds))
+            precision = float(precision_score(self.y_test_local, preds, pos_label=POSITIVE_CLASS, zero_division=0))
+            recall = float(recall_score(self.y_test_local, preds, pos_label=POSITIVE_CLASS, zero_division=0))
+            f1 = float(f1_score(self.y_test_local, preds, pos_label=POSITIVE_CLASS, zero_division=0))
 
             eps = 1e-7
             preds_prob_clipped = np.clip(preds_prob, eps, 1 - eps)
@@ -248,11 +265,17 @@ class XGBoostClient(fl.client.Client):
                 y_true * np.log(preds_prob_clipped) + (1 - y_true) * np.log(1 - preds_prob_clipped)
             ))
 
-            print(f"[Info-Test] Accuracy: {accuracy:.4f}, LogLoss: {logloss:.4f}")
-            return logloss, accuracy
+            print(
+                f"[Info-Test] Accuracy: {accuracy:.4f} Precision: {precision:.4f} "
+                f"Recall: {recall:.4f} F1: {f1:.4f} LogLoss: {logloss:.4f}"
+            )
+            return {
+                "logloss": logloss, "accuracy": accuracy,
+                "precision": precision, "recall": recall, "f1": f1,
+            }
         except Exception as e:
             print(f"[Warning] Local model evaluation failed: {e}")
-            return 1.0, 0.0
+            return {"logloss": 1.0, "accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0}
 
     def get_parameters(self, ins: GetParametersIns) -> GetParametersRes:
         parameters = self._parameters_from_booster()
@@ -275,7 +298,7 @@ class XGBoostClient(fl.client.Client):
             xgb_model=self.bst, verbose_eval=False
         )
 
-        local_logloss, local_accuracy = self._evaluate_local_test()
+        local_metrics = self._evaluate_local_test()
         self._save_model_artifact()
 
         return FitRes(
@@ -283,8 +306,12 @@ class XGBoostClient(fl.client.Client):
             parameters=self._parameters_from_booster(),
             num_examples=self.num_train,
             metrics={
-                "accuracy": local_accuracy,
-                "logloss": local_logloss,
+                "client_id": self.client_id,
+                "accuracy": local_metrics["accuracy"],
+                "precision": local_metrics["precision"],
+                "recall": local_metrics["recall"],
+                "f1": local_metrics["f1"],
+                "logloss": local_metrics["logloss"],
                 "model_load_failures": self.model_load_failures,
             },
         )
@@ -297,16 +324,21 @@ class XGBoostClient(fl.client.Client):
                 status=Status(code=Code.OK, message="Success"),
                 loss=1.0,
                 num_examples=0,
-                metrics={"accuracy": 0.0},
+                metrics={"accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0},
             )
 
-        logloss, accuracy = self._evaluate_local_test()
-        print(f"[Info] Client {self.client_id}] local test accuracy: {accuracy:.4f}")
+        local_metrics = self._evaluate_local_test()
+        print(f"[Info] Client {self.client_id}] local test accuracy: {local_metrics['accuracy']:.4f}")
         return EvaluateRes(
             status=Status(code=Code.OK, message="Success"),
-            loss=logloss,
+            loss=local_metrics["logloss"],
             num_examples=self.num_test,
-            metrics={"accuracy": accuracy},
+            metrics={
+                "accuracy": local_metrics["accuracy"],
+                "precision": local_metrics["precision"],
+                "recall": local_metrics["recall"],
+                "f1": local_metrics["f1"],
+            },
         )
 
 
