@@ -10,5 +10,6 @@ model_baseline*
 model_bagging*
 model_leaf_scale*
 model_loo_*
+model_centralized_reseed.ubj
 output_models
 results
