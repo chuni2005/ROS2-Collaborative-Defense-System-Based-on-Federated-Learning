@@ -8,4 +8,7 @@ split_data
 model
 model_baseline
 model_bagging*
+model_leaf_scale*
+model_loo_*
 output_models
+results

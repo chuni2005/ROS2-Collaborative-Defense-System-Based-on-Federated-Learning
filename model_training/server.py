@@ -68,6 +68,43 @@ def preprocess_data(df):
     return df.astype(np.float32)
 
 
+def scale_leaf_values(model_json: bytes, w: float) -> bytes:
+    """Scale every leaf node's value in a serialized booster's trees by w.
+
+    Fixes the margin-explosion problem in notes/13a-bagging-baseline.md: 5
+    clients each independently boost 10 new trees against the SAME shared
+    global model every round, and aggregate_bagging_verified() sums (not
+    averages) all 5 contributions -- equivalent to a 5x learning-rate
+    inflation, compounding round over round until margins saturate the
+    sigmoid (round 1: [-8, 7]; round 10: [-14214, 2283], see notes/13a).
+
+    Insertion point per notes/00-findings.md finding 3/notes/02 section 4:
+    since XGBoost's prediction is base_score + sum of every tree's selected
+    leaf value, scaling all leaf values in a client's new-tree batch by w
+    BEFORE it is merged into the global model scales that batch's
+    contribution to the ensemble by exactly w -- verified empirically
+    (leaf values live in BOTH base_weights[i] and split_conditions[i] at
+    leaf nodes, i.e. where left_children[i] == -1; scaling both by w=0.3
+    on a real client_1_round_1.ubj model reproduced a margin-contribution
+    ratio of 0.29999995-0.30000004 against the unscaled model, max error
+    9e-8 -- this resolves notes/02's "[推測，待驗證]" on the leaf formula).
+    Both fields are scaled together (not just one) so a client continuing
+    to boost on top of this model later (xgb_model=...) sees a consistent
+    tree, not a base_weights/split_conditions mismatch.
+    """
+    model = json.loads(bytearray(model_json))
+    trees = model["learner"]["gradient_booster"]["model"]["trees"]
+    for tree in trees:
+        left_children = tree["left_children"]
+        base_weights = tree["base_weights"]
+        split_conditions = tree["split_conditions"]
+        for i, left in enumerate(left_children):
+            if left == -1:
+                base_weights[i] = base_weights[i] * w
+                split_conditions[i] = split_conditions[i] * w
+    return bytes(json.dumps(model), "utf-8")
+
+
 def aggregate_bagging_verified(bst_prev_org: Optional[bytes], bst_curr_org: bytes) -> bytes:
     """Bagging aggregation: append the trees in bst_curr_org to bst_prev_org.
 
@@ -181,13 +218,17 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
     # from the predictions, e.g. a validation chunk or client test split that
     # happens to contain only one label. Not exercised against real data yet.
     def _evaluate_model_on_server(self, model_bytes: bytes) -> Dict[str, float]:
-        zero_metrics = {"accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0}
+        zero_metrics = {
+            "accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0,
+            "margin_min": 0.0, "margin_max": 0.0, "margin_mean": 0.0,
+        }
         if self.dval is None:
             return zero_metrics
         try:
             bst = xgb.Booster()
             bst.load_model(bytearray(model_bytes))
             preds = bst.predict(self.dval)
+            margin = bst.predict(self.dval, output_margin=True)
 
             preds_binary = [1 if p > 0.5 else 0 for p in preds]
             correct = sum(1 for p, y in zip(preds_binary, self.y_true) if p == y)
@@ -200,6 +241,9 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
                 "precision": float(precision),
                 "recall": float(recall),
                 "f1": float(f1),
+                "margin_min": float(np.min(margin)),
+                "margin_max": float(np.max(margin)),
+                "margin_mean": float(np.mean(margin)),
             }
         except Exception as e:
             print(f"[Error] Failed to evaluate model on server: {e}")
@@ -303,9 +347,18 @@ class XGBoostBaggingStrategy(XGBoostStrategy):
     real UBJ.
     """
 
-    def __init__(self, model_dir: str, num_clients: int, val_data_path: Optional[str] = None):
+    def __init__(self, model_dir: str, num_clients: int, val_data_path: Optional[str] = None,
+                 leaf_scale: float = 1.0):
         super().__init__(model_dir, num_clients, val_data_path)
         self.global_model_json: Optional[bytes] = None
+        # See scale_leaf_values() docstring and notes/13a-bagging-baseline.md
+        # "未解問題" 1 -- fixes the margin-explosion problem from summing
+        # (not averaging) 5 clients' independent corrections each round.
+        # Configurable, NOT hardcoded to 1/num_clients: that's one
+        # hypothesis (matches NVFlare's lr_mode="uniform" default, see
+        # notes/03/notes/00-findings.md finding 5), not an established fact
+        # for this codebase's num_boost_round=10-per-round setup.
+        self.leaf_scale = leaf_scale
 
     def aggregate_fit(
         self,
@@ -349,6 +402,13 @@ class XGBoostBaggingStrategy(XGBoostStrategy):
                 f"sent {num_trees_received} tree(s) this round."
             )
 
+            # Scale THIS client's new-tree batch before merging -- server-side,
+            # not client-side, so a malicious client can't opt out of the
+            # scaling by simply not applying it (zero-trust, same rationale
+            # as len(trees_curr) below not trusting any client-declared
+            # count -- see aggregate_bagging_verified()'s docstring).
+            payload_json = scale_leaf_values(payload_json, self.leaf_scale)
+
             merged_json = aggregate_bagging_verified(merged_json, payload_json)
 
         self.global_model_json = merged_json
@@ -367,7 +427,9 @@ class XGBoostBaggingStrategy(XGBoostStrategy):
         with open(self.latest_model_path, "wb") as f: f.write(merged_ubj)
 
         print(f"[Info] Round {server_round} bagging-merged {len(results)} client models "
-              f"(accuracy={merged_metrics['accuracy']:.4f}, f1={merged_metrics['f1']:.4f}) "
+              f"(accuracy={merged_metrics['accuracy']:.4f}, f1={merged_metrics['f1']:.4f}, "
+              f"margin=[{merged_metrics['margin_min']:.2f}, {merged_metrics['margin_max']:.2f}], "
+              f"margin_mean={merged_metrics['margin_mean']:.2f}) "
               f"and saved it to {model_path}")
 
         aggregated_parameters = Parameters(tensors=[merged_ubj], tensor_type="xgboost-ubj")
@@ -425,14 +487,27 @@ if __name__ == "__main__":
     parser.add_argument("--aggregation", type=str, default="winner", choices=["winner", "bagging"],
                         help="winner = max() picks the single highest-F1 client model each round (default, existing behavior). "
                              "bagging = Flower's official bagging aggregate() concatenates every client's trees, none discarded.")
+    parser.add_argument("--leaf_scale", type=float, default=1.0,
+                        help="bagging mode only: multiply each client's new-tree leaf values by this "
+                             "before merging (see scale_leaf_values()). 1.0 = no scaling (original bug). "
+                             "Fixes the margin-explosion problem from summing 5 independent corrections "
+                             "each round -- see notes/13a-bagging-baseline.md.")
     args = parser.parse_args()
 
     strategy_cls = XGBoostBaggingStrategy if args.aggregation == "bagging" else XGBoostStrategy
-    strategy = strategy_cls(
-        model_dir=args.model_dir,
-        num_clients=args.num_clients,
-        val_data_path=args.validation_data_path
-    )
+    if args.aggregation == "bagging":
+        strategy = strategy_cls(
+            model_dir=args.model_dir,
+            num_clients=args.num_clients,
+            val_data_path=args.validation_data_path,
+            leaf_scale=args.leaf_scale,
+        )
+    else:
+        strategy = strategy_cls(
+            model_dir=args.model_dir,
+            num_clients=args.num_clients,
+            val_data_path=args.validation_data_path,
+        )
 
     print("[Info] Flower Server (XGBoost) is starting...")
     fl.server.start_server(
