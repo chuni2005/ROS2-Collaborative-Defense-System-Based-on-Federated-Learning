@@ -15,6 +15,11 @@ VALIDATION_DATA = f"split_data/chunk_{NUM_CLIENTS+1}.csv"
 SPLIT_UNIT = 1200000
 SPLIT_DIR = "split_data"
 SPLIT_RANDOM = True
+# Fixes notes/13-progress-summary.md's reproducibility risk: split.py's
+# reservoir sampling had no fixed seed, so re-running split_data() produced
+# a different split every time. See notes/12b-branch-delta.md for the seed
+# value and what it does/doesn't make reproducible.
+SPLIT_SEED = 42
 
 LOG_DIR = "logs"
 MODEL_DIR = "model"
@@ -72,8 +77,8 @@ class MainRunner(object):
                     f"--target_data={self._resolve_data_path()}",
                     f"--split_dir={os.path.join(self.base_dir, SPLIT_DIR)}",
                     f"--unit={SPLIT_UNIT}",
-                    f"--chunk={NUM_CLIENTS + 1}", # one for server validation data 
-                ] + (["--random"] if SPLIT_RANDOM else []),
+                    f"--chunk={NUM_CLIENTS + 1}", # one for server validation data
+                ] + ([f"--random", f"--seed={SPLIT_SEED}"] if SPLIT_RANDOM else []),
                 stdout=split_log,
                 stderr=split_log,
                 check=True,

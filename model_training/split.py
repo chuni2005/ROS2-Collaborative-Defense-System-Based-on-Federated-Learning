@@ -202,11 +202,17 @@ def main():
     parser.add_argument("--unit", type=int, default=1000, help="Number of rows per process file. Default is 1000.")
     parser.add_argument("--chunk", type=int, default=1, help="Number of chunks to split the data for.")
     parser.add_argument("--random", action="store_true", help="Enable random sampling instead of chronological splitting.")
+    parser.add_argument("--seed", type=int, default=None,
+                         help="Seed for --random's reservoir sampling and shuffle, so the split is "
+                              "reproducible across runs. Unset (default) keeps the original "
+                              "non-deterministic behavior. Ignored in chronological mode.")
     args = parser.parse_args()
 
     detect(args)
     tmp = copy_data(args.target_data)
     if args.random:
+        if args.seed is not None:
+            random.seed(args.seed)
         split_csv_random(tmp, args)
     else:
         split_csv_ordered(tmp, args)
