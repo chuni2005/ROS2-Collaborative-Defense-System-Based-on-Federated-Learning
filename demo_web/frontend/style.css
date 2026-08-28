@@ -246,6 +246,23 @@ button:hover {
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
+.fdo-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  background: var(--bg-accent);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+.fdo-badge.onboarded {
+  color: var(--success);
+  border-color: var(--success);
+}
+.fdo-badge.stale {
+  color: var(--warning);
+  border-color: var(--warning);
+}
 .diagnosis-panel {
   display: flex;
   flex-direction: column;

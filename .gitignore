@@ -7,3 +7,5 @@ model
 output_models
 dataset/*
 !.gitkeep
+fdo-integration/workdir/
+demo_web/backend/guid_machine_map.json

@@ -5,15 +5,11 @@ from datetime import datetime, timezone
 
 from flask import Flask, jsonify, request
 
+import fdo_client
+
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend")
 
 MACHINE_COUNT = 5
-
-# 機台來源 IP -> 機台編號，寫死的對照表。127.0.0.1 留給本機測試用，
-# 之後請把實際機台的區網 IP 換進來。
-IP_MACHINE_MAP = {
-    "127.0.0.1": 1,
-}
 
 SCORE_THRESHOLD = 50          # 信任分數低於此值視為異常
 ABNORMAL_SUSTAIN_SECONDS = 4  # 異常持續幾秒才觸發截斷（3~5 秒）
@@ -86,12 +82,15 @@ def list_machines():
 def machine_status():
     now = time.time()
     with lock:
-        return jsonify(
-            [
-                {"id": m["id"], "name": m["name"], "light": compute_light(m, now), "score": m["score"]}
-                for m in machines.values()
-            ]
-        )
+        rows = [
+            {"id": m["id"], "name": m["name"], "light": compute_light(m, now), "score": m["score"]}
+            for m in machines.values()
+        ]
+    for row in rows:
+        fdo_status = fdo_client.get_fdo_status(row["id"])
+        row["fdoOnboarded"] = fdo_status["onboarded"]
+        row["fdoStale"] = fdo_status["stale"]
+    return jsonify(rows)
 
 
 @app.post("/api/machines/select")
@@ -106,10 +105,18 @@ def select_machine():
 
 @app.post("/api/ingest")
 def ingest():
-    machine_id = IP_MACHINE_MAP.get(request.remote_addr)
-    if machine_id is None:
-        return jsonify({"error": "unknown source ip", "ip": request.remote_addr}), 403
+    # Gate A: 機台身分要靠真的 FDO 上線紀錄，不是靠來源 IP。
+    guid = request.headers.get("X-Device-Guid")
+    guid_entry = fdo_client.load_guid_machine_map().get(guid) if guid else None
+    if guid_entry is None:
+        return jsonify({"error": "unknown device guid", "guid": guid}), 403
 
+    machine_id = guid_entry["machineId"]
+    fdo_status = fdo_client.get_fdo_status(machine_id)
+    if not fdo_status["onboarded"]:
+        return jsonify({"error": "device not onboarded", "machineId": machine_id}), 403
+
+    # Gate B: 信任分數持續異常會被截斷，邏輯不變。
     now = time.time()
     row = request.get_json(silent=True) or {}
 
@@ -195,4 +202,5 @@ def publisher_status(machine_id):
 
 
 if __name__ == "__main__":
+    fdo_client.start_poller()
     app.run(port=5181, debug=False)

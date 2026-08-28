@@ -77,6 +77,11 @@ const StatusLights = {
         <li v-for="m in statuses" :key="m.id" class="status-row" :class="{ active: m.id === activeMachineId }">
           <span class="light" :style="{ backgroundColor: lightColor[m.light] }"></span>
           <span class="name">{{ m.name }}</span>
+          <span
+            class="fdo-badge"
+            :class="{ onboarded: m.fdoOnboarded, stale: m.fdoStale }"
+            :title="m.fdoStale ? 'FDO 狀態可能過期' : (m.fdoOnboarded ? 'FDO 已上線' : 'FDO 尚未上線')"
+          >FDO {{ m.fdoOnboarded ? '✓' : '✗' }}</span>
           <span class="score">{{ m.score !== null ? m.score.toFixed(1) : '-' }}</span>
         </li>
       </ul>

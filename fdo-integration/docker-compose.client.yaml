@@ -1,0 +1,23 @@
+# Same shape as FDO/go-fdo-server/deployments/compose/client/fdo-client.yaml,
+# but built from the local go-fdo-client submodule (pinned commit, no network
+# fetch at demo time) instead of the upstream GitHub repo's main branch.
+services:
+  go-fdo-client:
+    container_name: go-fdo-client
+    hostname: go-fdo-client
+    image: go-fdo-client
+    build: ../FDO/go-fdo-client
+    working_dir: ${container_working_dir:-/workdir}/device-credentials
+    user: "0:0"
+    networks:
+      - fdo
+    volumes:
+      - ${base_dir:-./workdir}:${container_working_dir:-/workdir}
+    restart: "no"
+    environment:
+      # https://github.com/fido-device-onboard/go-fdo/issues/210
+      TMPDIR: ${container_working_dir:-/workdir}/tmp
+networks:
+  fdo:
+    name: fdo
+    external: true
