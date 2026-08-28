@@ -47,7 +47,6 @@ class StratifiedSplit(SplitBase):
             record_pools[rec.attack].append(rec)
         attack_labels = list(record_pools.keys())
         
-        final_chunks = []
         for i, (path, size) in enumerate(self.chunk.chunk_path):
             main_needed = (size // 10) * 8
             other_needed = (size // 10) * 2
@@ -99,6 +98,7 @@ class StratifiedSplit(SplitBase):
             print(
                 f"[Info] Success for turn table to {path}."
             )
+            self.plot_attack_labels(path)
 
         except Exception as e:
             raise IOError(

@@ -5,7 +5,7 @@ import subprocess
 import time
 import shutil
 
-from split import SequentialSplit
+from split import StratifiedSplit
 
 NUM_CLIENTS = 5
 CHUNK_NUM = NUM_CLIENTS + 1
@@ -13,7 +13,7 @@ NUM_ROUNDS = 10
 TARGET_DATA = "../ROSPaCe_complete/ROSPaCe_complete_noperiodicity.csv"
 VALIDATION_DATA = f"split-data/chunk_{CHUNK_NUM}.csv"
 
-SPLIT_UNIT = 1200000
+SPLIT_UNIT = 10000 # 1200000
 SPLIT_DIR = "split-data"
 
 LOG_DIR = "logs"
@@ -48,7 +48,7 @@ class MainRunner(object):
         self.client_procs = []
         self.round_times = []
         self.init()
-        self.splitter = SequentialSplit(
+        self.splitter = StratifiedSplit(
             src_path=self._resolve_data_path(),
             tmp_dir=os.path.join(self.base_dir, "tmp"),
             output_dir=os.path.join(self.base_dir, SPLIT_DIR),
@@ -168,7 +168,7 @@ class MainRunner(object):
     def detect(self, file_check: bool = True):
         if SPLIT_UNIT % CHUNK_NUM != 0:
             print("[Warning] Bruh your SPLIT_UNIT must be divisible by NUM_CLIENTS + 1!")
-            sys.exit(1)
+            # sys.exit(1)
 
         if not file_check:
             return

@@ -2,6 +2,9 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import List, Tuple, Optional, overload
 from collections import Counter
+import matplotlib.pyplot as plt
+from datetime import datetime
+import pandas as pd
 import tempfile
 import shutil
 import csv
@@ -89,10 +92,10 @@ class SplitBase(ABC):
         self.it = IndexTable(table_path=self.temp.temp_data_path)
 
         with open(self.temp.temp_data_path, "rb") as f:
-            header = f.readline()
-            self.it.header_bytes = header
+            header_bytes = f.readline()
+            self.it.header_bytes = header_bytes
 
-            header_text = header.decode("utf-8", errors="ignore").strip()
+            header_text = header_bytes.decode("utf-8", errors="ignore").strip()
             headers = [
                 h.strip().strip("\"'").lower() for h in next(csv.reader([header_text]))
             ]
@@ -102,22 +105,34 @@ class SplitBase(ABC):
             attack_col_idx = headers.index("attack")
 
             current_offset = f.tell()
-            while line := f.readline():
-                row_length = f.tell() - current_offset
+            
+            while True:
+                line_bytes = f.readline()
+                if not line_bytes:
+                    break
+                    
+                row_length = len(line_bytes)
+                
+                while line_bytes.count(b'"') % 2 != 0:
+                    next_line = f.readline()
+                    if not next_line:
+                        break
+                    line_bytes += next_line
+                    row_length += len(next_line)
 
-                line_str = line.decode("utf-8", errors="ignore").strip()
+                line_str = line_bytes.decode("utf-8", errors="ignore").strip()
 
                 if line_str:
-                    # try:
-                    columns = next(csv.reader([line_str]))
-                    # except csv.Error:
-                    # columns = line_str.split(",")
+                    try:
+                        columns = next(csv.reader([line_str]))
+                        
+                        if len(columns) > attack_col_idx:
+                            attack_label = columns[attack_col_idx].strip().strip("\"'")
+                        else:
+                            attack_label = "unknown"
+                    except Exception:
+                        attack_label = "unknown"
 
-                    attack_label = (
-                        columns[attack_col_idx].strip().strip("\"'")
-                        if len(columns) > attack_col_idx
-                        else "unknown"
-                    )
                     self.it.records.append(
                         RowRecord(
                             offset=current_offset,
@@ -125,13 +140,47 @@ class SplitBase(ABC):
                             attack=attack_label,
                         )
                     )
-                current_offset = f.tell()
+                    
+                current_offset += row_length
+
             self.output_index_table_attack_distributed()
 
     def output_index_table_attack_distributed(self):
         all_labels = [record.attack for record in self.it.records]
         self.label_distribution = Counter(all_labels)
         print(f"[Info] Attack Label Distributed: {dict(self.label_distribution)}")
+
+    def cleanup(self) -> None:
+        try:
+            self.temp.temp_data_path.unlink(missing_ok=True)
+        except Exception as exc:
+            print(f"[Warn] Failed to clean up temp file: {exc}")
+
+    def plot_attack_labels(self, csv_path: str, label_col: str = 'attack') -> None:
+        os.makedirs(self.chart.chart_dir, exist_ok=True)
+        df = pd.read_csv(csv_path)
+        
+        if label_col not in df.columns:
+            raise ValueError(f"[Error] Cannot find Column: {label_col}")
+        
+        label_counts = df[label_col].value_counts()
+        
+        plt.figure(figsize=(10, 6))
+        label_counts.plot(kind='bar', color='skyblue', edgecolor='black')
+        plt.title('Attack Label Distribution', fontsize=16)
+        plt.xlabel('Attack Type', fontsize=12)
+        plt.ylabel('Count', fontsize=12)
+        plt.xticks(rotation=45, ha='right')
+        plt.tight_layout()
+        
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f'attack_label_distribution_{timestamp}.png'
+        
+        output_path = os.path.join(self.chart.chart_dir, filename)
+        plt.savefig(output_path)
+        plt.close()
+        
+        print(f"[Info] Created chart successfully: {output_path}")
 
     @overload
     def remove_record_by_index(self, index: int) -> None: ...
@@ -163,12 +212,6 @@ class SplitBase(ABC):
                 )
             self.it.records.pop(index)
             self.it.row_num -= 1
-
-    def cleanup(self) -> None:
-        try:
-            self.temp.temp_data_path.unlink(missing_ok=True)
-        except Exception as exc:
-            print(f"[Warn] Failed to clean up temp file: {exc}")
 
     @abstractmethod
     def split_to_chunks(self) -> List[Tuple[Path, int]]:

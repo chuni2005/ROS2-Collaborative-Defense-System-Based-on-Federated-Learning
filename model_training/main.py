@@ -8,9 +8,10 @@ def main():
     while not runner.is_done():
         try:
             runner.split_data()
-            runner.run_server()
-            runner.run_clients()
-            runner.life_check()
+            break
+            # runner.run_server()
+            # runner.run_clients()
+            # runner.life_check()
             print(
                 "[Info] If u wanna close them, press Ctrl+C, but I wish u don't do that ouob .\n"
             )
