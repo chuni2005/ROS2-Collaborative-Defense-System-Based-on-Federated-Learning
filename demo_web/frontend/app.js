@@ -1,4 +1,4 @@
-import { createApp, computed, onMounted, ref } from './vendor/vue.esm-browser.prod.js'
+import { createApp, computed, onMounted, ref, watch } from './vendor/vue.esm-browser.prod.js'
 import { getMachines, getAllStatus, selectMachine, getDiagnosis, getPublisherStatus, usePolling } from './api.js'
 
 const MachineSelectConfirm = {
@@ -89,11 +89,39 @@ const StatusLights = {
   `,
 }
 
+const SCORE_HISTORY_LENGTH = 10 // 每秒 poll 一次，約等於近 10 秒的趨勢
+
 const DiagnosisPanel = {
   props: { machineId: { type: Number, required: true }, machineName: { type: String, required: true } },
   setup(props) {
     const { data: diagnosis, error } = usePolling(() => getDiagnosis(props.machineId))
-    return { diagnosis, error }
+    const history = ref([])
+
+    watch(
+      () => props.machineId,
+      () => {
+        history.value = []
+      },
+    )
+    watch(diagnosis, (d) => {
+      if (d && d.score !== null) {
+        history.value = [...history.value, d.score].slice(-SCORE_HISTORY_LENGTH)
+      }
+    })
+
+    const chartPoints = computed(() => {
+      const points = history.value
+      if (points.length < 2) return ''
+      return points
+        .map((score, i) => {
+          const x = (i / (points.length - 1)) * 100
+          const y = 100 - Math.max(0, Math.min(100, score))
+          return `${x},${y}`
+        })
+        .join(' ')
+    })
+
+    return { diagnosis, error, chartPoints }
   },
   template: `
     <section class="panel diagnosis-panel">
@@ -111,7 +139,10 @@ const DiagnosisPanel = {
           </ul>
         </div>
         <div class="score-block">
-          <p class="section-title">信任分數</p>
+          <p class="section-title">信任分數（近 10 秒趨勢）</p>
+          <svg class="score-chart" viewBox="0 0 100 100" preserveAspectRatio="none">
+            <polyline :points="chartPoints" />
+          </svg>
           <p>{{ diagnosis.score !== null ? diagnosis.score.toFixed(1) : '尚無資料' }}</p>
         </div>
       </template>
