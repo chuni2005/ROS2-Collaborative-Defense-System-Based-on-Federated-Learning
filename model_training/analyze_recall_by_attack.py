@@ -1,14 +1,25 @@
-"""Per-attack-type recall / false-positive-rate breakdown for a saved model.
+"""對一個已經訓練好的模型，拆解出逐攻擊類型的 recall，不是只看整體 F1。
 
-Used by run_leaf_scale_sweep.py (see notes/13a-bagging-baseline.md and the
-leaf-scale follow-up note) to compare how each leaf_scale value affects
-detection of individual attack subtypes on the server's validation chunk
-(chunk_6.csv), not just the binarized overall F1.
+原理：整體 F1／accuracy 是把所有攻擊類型混在一起算的單一數字，如果某幾種
+攻擊佔了驗證集大多數樣本，整體指標會被這幾種主導，稀釋掉少數類型測不到
+的問題。這支腳本用原始的（未二元化的）attack 欄位分組，逐一計算每種類型
+自己的表現，才看得出哪些類型測得到、哪些測不到。
 
-'observe' (label 0, benign) is reported as false-positive rate (fraction
-wrongly predicted as attack); every other attack subtype (label 1) is
-reported as recall (fraction correctly predicted as attack). This mirrors
-the table format already used in notes/13a-bagging-baseline.md.
+輸入：一個已存檔的模型（.ubj 檔案路徑），以及驗證資料 CSV（預設
+chunk_6.csv，需要保留原始的 attack 字串欄位，不能先二元化）。
+輸出：印在終端機上的一張表，每種攻擊類型一列，數字是「這個類型裡有多少
+比例被模型判定為攻擊」。
+
+怎麼做：用跟 server.py 一樣的 preprocess_data() 把特徵欄位處理成模型看得
+懂的格式，但保留原始的 attack 字串欄位另外存起來；模型預測完，對每個
+攻擊類型的樣本分別算「預測為攻擊」的比例——對 observe（正常流量）這個
+比例代表假陽性率，對其餘每種攻擊類型這個比例就是 recall。
+
+為什麼需要它：被 run_leaf_scale_sweep.py 等腳本呼叫，用來比較不同設定
+（例如不同的 leaf_scale）對個別攻擊類型偵測率的影響，不是只看整體 F1
+這一個數字。
+
+完整調查過程見 notes/13a-bagging-baseline.md、notes/13a-leaf-scale-fix.md。
 """
 import argparse
 

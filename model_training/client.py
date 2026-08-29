@@ -223,14 +223,36 @@ class XGBoostClient(fl.client.Client):
         tensors = [model_bytes] if model_bytes else []
         return Parameters(tensors=tensors, tensor_type=TENSOR_TYPE)
 
-    # 只在 bagging 模式用：只送這一輪新增的樹，不送整個累積的模型。伺服器端
-    # 的 bagging 聚合要正確運作，這是必要條件——為什麼送整個模型會讓 Flower
-    # 的 aggregate() 壞掉，見 notes/00-findings.md 發現 21 與
-    # notes/13a-bagging-baseline.md。用 num_boosted_rounds() 切片是 Flower
-    # 自己的 bagging 範例用的同一招（client_app.py 的 _local_boost()），
-    # 已經實測驗證過，即使是接著前一輪的模型繼續訓練（xgb_model=...），
-    # 也能正確切出這一輪新增的部分。
     def _parameters_from_new_trees(self) -> Parameters:
+        """只把這個節點這一輪新練的樹切出來、包成 Parameters，不是整個模型。
+
+        原理：XGBoost 的 Booster 支援切片語法 booster[a:b]，取出「第 a 到 b
+        次訓練疊代對應的樹」組成一個新的、獨立的 Booster。每次呼叫
+        xgb.train(..., num_boost_round=N, xgb_model=舊模型) 都會在舊模型
+        後面剛好新增 N 個疊代（這個專案的設定下，一次疊代就是一棵樹）。所以
+        「總疊代數 − 這次新增的疊代數」到「總疊代數」這一段切片，剛好就是
+        這一輪新練出來的那些樹，不多也不少。
+
+        輸入：self.bst — 這個節點目前的完整模型（上一輪收到的全域模型 +
+              這一輪剛練好的 NUM_BOOST_ROUND 棵新樹）
+        輸出：Parameters 物件，裡面只裝這一輪新增的 NUM_BOOST_ROUND 棵樹，
+              序列化成 UBJ bytes（不是 self.bst 整個模型）
+
+        怎麼做：total_rounds = self.bst.num_boosted_rounds() 拿到目前總共
+        練了幾個疊代；用切片 self.bst[total_rounds-NUM_BOOST_ROUND :
+        total_rounds] 取出最後 NUM_BOOST_ROUND 個疊代，變成一個新的
+        Booster；因為 XGBoost 沒有直接序列化到記憶體 bytes 的 API，這裡先
+        存成暫存檔、讀回 bytes、再刪掉暫存檔。
+
+        為什麼需要它：只在 bagging 模式使用。如果每輪都送整個累積的模型，
+        伺服器合併時沒辦法知道「這次新增的是哪幾棵」，只能用不可靠的欄位去
+        猜（這正是直接套用 Flower 官方 aggregate() 會出問題的原因，見
+        aggregate_bagging_verified() 的 docstring）。只送這一輪新練的樹，
+        伺服器直接數收到幾棵就知道要接幾棵，不需要猜、也不用相信節點自己
+        宣稱新增了幾棵。
+
+        完整調查過程見 notes/00-findings.md、notes/13a-bagging-baseline.md。
+        """
         if self.bst is None:
             return Parameters(tensors=[], tensor_type=TENSOR_TYPE)
 
@@ -250,7 +272,6 @@ class XGBoostClient(fl.client.Client):
 
         return Parameters(tensors=[model_bytes] if model_bytes else [], tensor_type=TENSOR_TYPE)
 
-    # 已用 notes/12-baseline.md 的真實資料驗證過。
     def _evaluate_global_on_local_test(self):
         print("[Info-Test] Server global model - local test")
         if self.bst is None:
@@ -268,7 +289,6 @@ class XGBoostClient(fl.client.Client):
         except Exception as e:
             print(f"[Warning] Global model evaluation failed: {e}")
 
-    # 已用 notes/12-baseline.md 的真實資料驗證過。
     # zero_division=0：某個 client 的本地測試切分（自己那份 chunk 的 20%）
     # 剛好只有單一標籤時，precision/recall/F1 會回傳 0.0，不會拋出例外或
     # 警告——這個邊界情況目前還沒有在真實資料上被觸發過，所以這個預設值

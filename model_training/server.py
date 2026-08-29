@@ -194,9 +194,9 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
         # 直接報錯中止，取代舊版那個靜默的 fallback（self.dval = None ->
         # aggregate_fit() 改成相信 fit_res.metrics["accuracy"]，一個 client
         # 自己算出來、伺服器完全沒有交叉驗證的數字）。惡意 client 只要回報
-        # accuracy=1.0，不需要真的訓練，就能在 max() 底下每輪都贏——完整的
-        # 攻擊情境見 notes/00-findings.md 發現 18。這個專題的名字裡有「零信任」
-        # 三個字，那個 fallback 正是這個精神的具體反例。
+        # accuracy=1.0，不需要真的訓練，就能在 max() 底下每輪都贏。這個專題
+        # 的名字裡有「零信任」三個字，那個 fallback 正是這個精神的具體反例。
+        # 完整攻擊情境見 notes/00-findings.md 發現 18。
         if not val_data_path or not os.path.exists(val_data_path):
             raise FileNotFoundError(
                 f"Server-side validation data not found at {val_data_path!r}. "
@@ -247,11 +247,10 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
             return None
         return bytes(parameters.tensors[0])
 
-    # 已用 notes/12-baseline.md 的真實資料驗證過（兩次完整的 10 輪執行，
-    # baseline_run1/run2）。zero_division=0 代表某個類別在 y_true 或預測值
-    # 裡完全缺席時（例如驗證集或 client 本地測試切分剛好只有單一標籤），
-    # precision/recall/F1 會回傳 0.0（不是警告或例外）——這個邊界情況目前
-    # 還沒有在真實資料上被真正觸發過，沒有實測驗證。
+    # zero_division=0 代表某個類別在 y_true 或預測值裡完全缺席時（例如
+    # 驗證集或 client 本地測試切分剛好只有單一標籤），precision/recall/F1
+    # 會回傳 0.0（不是警告或例外）——這個邊界情況目前還沒有在真實資料上被
+    # 真正觸發過，沒有實測驗證。完整驗證紀錄見 notes/12-baseline.md。
     def _evaluate_model_on_server(self, model_bytes: bytes) -> Dict[str, float]:
         zero_metrics = {
             "accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0,
@@ -318,9 +317,9 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
                 )
                 payloads.append((payload, server_metrics, client_proxy.cid, reported_client_id))
 
-        # 排序依據從 accuracy 換成 F1——見 notes/11-dataset-check.md「誠實模型的
-        # accuracy 基準線」一節，以及 notes/12-baseline.md（已驗證：判斷空間跟
-        # 「永遠回答攻擊」這個地板分相差約 19.6 個 F1 百分點，遠高於雜訊範圍）。
+        # 排序依據從 accuracy 換成 F1：判斷空間跟「永遠回答攻擊」這個地板分
+        # 相差約 19.6 個 F1 百分點，遠高於雜訊範圍，足夠拿來分高下。完整
+        # 推導見 notes/11-dataset-check.md、notes/12-baseline.md。
         best_payload, best_metrics, best_cid, best_client_id = max(payloads, key=lambda item: item[1]["f1"])
 
         model_path = os.path.join(self.model_dir, f"global_model_round_{server_round}.ubj")

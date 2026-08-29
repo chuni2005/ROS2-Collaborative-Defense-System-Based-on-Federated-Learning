@@ -1,8 +1,24 @@
-"""Single winner-take-all (--aggregation=winner) 10-round baseline run,
-used to refresh notes/12-baseline.md's headline numbers after split_data
-was regenerated with a fixed seed (see notes/12b-branch-delta.md,
-SPLIT_SEED=42 in settings.py). Mirrors run_leaf_scale_sweep.py's
-orchestration but for the existing winner-take-all strategy, not bagging.
+"""跑一次完整的 10 輪贏者全拿 baseline，重新產生 baseline 數字。
+
+原理：這不是獨立的聚合機制，是把既有的 server.py（--aggregation=winner）
+跟 client.py 組合起來，跑一次完整流程再把結果整理成檔案——跟
+run_leaf_scale_sweep.py 是同一套執行框架，差別只在這裡只跑一組設定
+（贏者全拿），不是掃描多個係數。
+
+輸入：磁碟上既有的 split_data/chunk_1..6.csv。
+輸出：伺服器 log 解析出來的逐輪 accuracy/F1（印在終端機），以及第 10 輪
+模型的逐攻擊類型 recall（results/baseline_reseed_recall.txt）。
+
+怎麼做：啟動 server.py（--aggregation=winner）跟 5 個 client.py 子行程，
+跑滿 10 輪；伺服器行程結束後，從它的 log 解析出每一輪贏家的
+accuracy/F1 印出來；再對第 10 輪存下來的模型呼叫
+analyze_recall_by_attack.py 算逐攻擊類型 recall。
+
+為什麼需要它：split_data 用固定種子重新產生過一次（SPLIT_SEED=42）之後，
+舊切分上的 baseline 數字沒辦法用同一份資料重現，這支腳本在新切分上補跑
+一次，讓原本的 baseline 頭條數字有對應的新資料版本可以對照。
+
+完整調查過程見 notes/12-baseline.md、notes/12b-branch-delta.md。
 """
 import os
 import re

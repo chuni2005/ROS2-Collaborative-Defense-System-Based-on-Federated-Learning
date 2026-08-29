@@ -1,19 +1,28 @@
-"""Centralized-pooling diagnostic comparison, reproduced on the reseeded
-split_data (SPLIT_SEED=42). Original methodology and rationale:
-notes/12-baseline.md "三種偵測失敗類型的成因" section -- this is a
-diagnostic tool to isolate "not enough samples" from "federated
-architecture can't use the samples that exist", NOT a proposed
-replacement for the federated pipeline (its precision/FPR are far worse,
-see below).
+"""把 5 個節點的訓練資料集中起來訓練一個模型，當作「架構問題還是資料
+問題」的診斷對照組。
 
-Pools chunk_1.csv..chunk_5.csv (the full chunks, not each client's 60%
-train split -- matches the original methodology) into a single XGBoost
-model trained with the same hyperparameters client.py uses
-(objective=binary:logistic, eta=0.1, max_depth=5, tree_method=hist),
-num_boost_round=100 to match the federated baseline's cumulative tree
-count after 10 rounds x 10 trees/round. Evaluated on chunk_6.csv with
-the same per-attack-type recall / observe-FPR breakdown as
-analyze_recall_by_attack.py.
+原理：聯邦架構下每個節點只看得到自己的資料，如果某個攻擊類型測不到，
+有兩種可能：資料裡真的沒有足夠訊號，或是資料裡有訊號、只是現有架構用
+不到。把全部節點的資料集中起來訓練同一個模型，如果集中式訓練測得到、
+聯邦測不到，就能確認是架構的問題，不是資料的問題。
+
+輸入：split_data/chunk_1..5.csv 全部（不是每個節點各自的 60% 訓練切分，
+這樣才跟原本比對用的方法論一致）。
+輸出：一個集中式訓練出來的模型（model_centralized_reseed.ubj），以及它在
+chunk_6.csv 上的整體指標跟逐攻擊類型 recall／observe 假陽性率
+（results/centralized_reseed_recall.txt）。
+
+怎麼做：把 5 個節點的資料合併成一份，用跟 client.py 完全一樣的超參數
+（objective=binary:logistic、eta=0.1、max_depth=5、tree_method=hist）
+訓練 100 棵樹（對齊聯邦 baseline 10 輪 × 每輪 10 棵樹的總樹數），在
+chunk_6.csv 上評估，用跟 analyze_recall_by_attack.py 一樣的方式拆解
+逐攻擊類型的表現。
+
+為什麼需要它：這不是要拿來取代聯邦架構的方案——集中式訓練出來的模型
+precision／假陽性率遠比聯邦版差，只是拿來當診斷工具，隔離「樣本太少」跟
+「架構限制」這兩個可能成因。
+
+完整調查過程見 notes/12-baseline.md。
 """
 import os
 

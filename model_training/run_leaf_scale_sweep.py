@@ -1,21 +1,31 @@
-"""掃描 leaf_scale ∈ {1/5, 1/3, 1/2, 1}，修正 notes/13a-bagging-baseline.md
-發現的 margin 暴衝問題（5 個 client 每輪各自獨立修正，伺服器把結果加總、
-不是平均——機制細節見 server.py 的 scale_leaf_values()／
-XGBoostBaggingStrategy 的 docstring）。
+"""掃描 leaf_scale 這個縮放係數，測哪個值能讓 bagging 合併穩定收斂。
 
-刻意不呼叫 split.py：split_data/chunk_*.csv 已經是前一次執行留下來的，
-而且 split.py 的切分沒有固定隨機種子（notes/12-baseline.md）——如果在
-掃描不同 leaf_scale 值之間重新切分，會把「leaf_scale 造成的效果」跟
-「換了一份資料切分造成的效果」混在一起，分不清楚是哪個原因。下面四個
-掃描值全部沿用磁碟上既有的同一份 chunk_1..6.csv 訓練與評估。
+原理：bagging 合併時，5 個節點每輪各自獨立對同一個全域模型修正，伺服器
+直接把 5 份修正加總（不是取平均），等於把學習率放大了將近 5 倍，逐輪
+疊加下去會讓預測值爆掉。leaf_scale 是拿來抵銷這個放大效果的縮放係數，
+掃描不同值就是為了找出哪個值最好（機制細節見 server.py 的
+scale_leaf_values()）。
 
-每個設定各自用一個全新的 model_dir（不然 initialize_parameters() 會接著
-前一個掃描值留下的模型繼續訓練），以及自己的 log 目錄
-（logs/leaf_scale_<label>/）。逐輪的 accuracy/F1/margin 是從伺服器自己的
-stdout 解析出來的（「[Info] Round N bagging-merged ...」這幾行 log，見
-server.py），寫進 results/leaf_scale_summary.csv；第 10 輪的逐攻擊類型
-recall 則另外用 analyze_recall_by_attack.py 算出來，存進
-results/leaf_scale_<label>_recall.txt。
+輸入：磁碟上既有的 split_data/chunk_1..6.csv（不重新切分，理由見下）；
+掃描 leaf_scale ∈ {1/5, 1/3, 1/2, 1} 四個候選值。
+輸出：results/leaf_scale_summary.csv（四組 × 10 輪的逐輪
+accuracy/F1/margin），以及每組第 10 輪模型的逐攻擊類型 recall
+（results/leaf_scale_<label>_recall.txt）。
+
+怎麼做：對每個候選值，各自跑一次完整的 10 輪聯邦 bagging 訓練，各自用一個
+全新的 model_dir（不然 initialize_parameters() 會接著前一個候選值留下的
+模型繼續訓練）跟自己的 log 目錄（logs/leaf_scale_<label>/）。逐輪的
+accuracy/F1/margin 是從伺服器自己的 stdout 解析出來的（「[Info] Round N
+bagging-merged ...」這幾行 log），四組跑完後彙整成一份 csv；另外對每組
+第 10 輪的模型呼叫 analyze_recall_by_attack.py 算逐攻擊類型 recall。
+
+為什麼刻意不重新切分：split_data/chunk_*.csv 已經是前一次執行留下來的，
+而且 split.py 的切分沒有固定隨機種子——如果在掃描不同 leaf_scale 值之間
+重新切分，會把「leaf_scale 造成的效果」跟「換了一份資料切分造成的效果」
+混在一起，分不清楚是哪個原因，所以四個候選值全部沿用磁碟上既有的同一份
+資料訓練與評估。
+
+完整調查過程見 notes/13a-bagging-baseline.md、notes/12-baseline.md。
 """
 import csv
 import os

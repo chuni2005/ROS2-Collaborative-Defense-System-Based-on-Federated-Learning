@@ -1,43 +1,42 @@
-"""修正後的 bagging pipeline（leaf_scale=0.5，見 notes/13a-leaf-scale-fix.md——
-w=0.5 已經定案）上，每個誠實 client 的留一法（leave-one-out）impact。
+"""量每個誠實節點被拿掉之後，全域模型的表現變化多少（留一法 impact）。
 
-中文導讀：
-吃什麼：這支腳本不接受參數，設定寫死在檔案開頭常數（`LEAF_SCALE`、
-    `ALL_CLIENTS` 等）——實際的輸入是磁碟上既有的 `split_data/chunk_1.csv`
-    ~`chunk_6.csv`（5 個 client 的訓練資料 + 1 份伺服器驗證資料），不會重新
-    切分。
-吐什麼：`results/loo_impact_summary.csv`（六組設定 × 10 輪的逐輪
-    accuracy/f1/margin），以及印在終端機上的一張 impact 表（`config`／`F1`／
-    `Impact(A-Bi)`）。
-中間轉換：對六組設定（候選 A：全部 5 個 client；候選 B_1~B_5：各排除一個
-    client）分別跑一次完整的 10 輪聯邦 bagging 訓練（真的啟動 server.py +
-    對應數量的 client.py 子行程，不是模擬），全部跑完之後比較每組的
-    round-10 F1。
-在流程裡的位置：這是 ERR/LFR 的核心動作（拿掉一個節點、重新聚合、比較跟
-    「全部保留」的差異）已經在跑，但目前只是**量測**——把量出來的差異拿去
-    跟「沒有拿掉任何節點」的雜訊底噪比較，不是拿去**決定要不要真的剔除某個
-    節點**。要變成真正的 ERR/LFR，還缺：(1) 每一輪即時算 impact，不是跑完
-    整個 10 輪才算一次；(2) 依 impact 排序，選出最大的 c 個節點；(3) 把這
-    c 個節點從這一輪的聚合裡真的排除掉，不是像現在這樣拿掉之後重跑一次
-    獨立的訓練。
+原理：訓練一次「全部節點都在」的模型（候選 A），再訓練幾次「只拿掉一個
+節點」的模型（候選 B_1~B_5），比較 A 跟每個 B_i 的表現差多少。如果某個
+節點的資料或行為特別可疑，拿掉它應該會讓模型明顯變好；如果拿掉任何節點的
+影響都差不多、都很小，代表目前沒有哪個節點特別突出。
 
-重做 notes/12-baseline.md「留一法（bagging LOO）」一節的量測——那一節用的是
-Flower 官方的 aggregate()，對每個 client 已經累積到第 10 輪的模型只呼叫一次，
-剛好重現了 notes/13a-bagging-baseline.md 找到的那個 bug（aggregate() 讀
-num_parallel_tree=1，於是只取到每個模型裡那棵從未更新過的舊樹，不是真正跑過
-10 輪聯邦訓練）。那一次量到的 impact（全部 5 個都是負值，全距只有 0.000016）
-是合併邏輯壞掉產生的雜訊，不是真實的節點間訊號——這支腳本在修正後的 pipeline
-上重新量一次。
+輸入：這支腳本不接受參數，設定寫死在檔案開頭常數（LEAF_SCALE、
+ALL_CLIENTS 等）；實際輸入是磁碟上既有的 split_data/chunk_1.csv~chunk_6.csv
+（5 個節點的訓練資料 + 1 份伺服器驗證資料），不會重新切分。
+輸出：results/loo_impact_summary.csv（六組設定 × 10 輪的逐輪
+accuracy/f1/margin），以及終端機上印出的一張 impact 表（config／F1／
+Impact(A-Bi)）。
 
-候選 A：全部 5 個誠實 client，真的跑 10 輪聯邦 bagging 訓練。
-候選 B_i：跟 A 一樣，但 client i 完全不參與訓練（4 個 client，
---num_clients=4，讓 Flower 的 min_fit_clients 對得上實際連線的人數）。
-A 跟每個 B_i 都用磁碟上既有的同一份 split_data/chunk_*.csv（不重新切分——
-理由見 run_leaf_scale_sweep.py 的 docstring），也用同一個 leaf_scale=0.5，
-所以 A 跟 B_i 之間唯一的差異就是「有沒有那一個 client 的資料跟樹」——排除掉
-縮放係數不同這個混淆變因，才能單純看出留一法本身的效果。
+怎麼做：六組設定（候選 A 全部 5 個節點；候選 B_i 排除節點 i，其餘 4 個，
+--num_clients=4 讓 Flower 內部的連線門檻對得上實際連上的節點數）分別各自
+跑一次完整的 10 輪聯邦 bagging 訓練（真的啟動 server.py 加上對應數量的
+client.py 子行程，不是模擬）。A 跟每個 B_i 都用磁碟上既有的同一份
+chunk_1..6.csv、同一個 leaf_scale=0.5，排除掉「資料切分不同」或「縮放
+係數不同」這兩個混淆變因，讓 A 跟 B_i 之間唯一的差異就是「有沒有那一個
+節點的資料跟樹」。全部跑完之後，取每組第 10 輪的 F1：Impact_i = F1_A −
+F1_Bi，正值代表拿掉這個節點讓模型變差，負值代表拿掉反而變好。
 
-Impact_i = F1_A - F1_Bi，符號慣例跟 notes/12-baseline.md 一致。
+為什麼需要它：這是 ERR/LFR 的核心動作（拿掉一個節點、重新聚合、比較跟
+「全部保留」的差異）已經在跑，但目前只是量測，不是拿去決定要不要真的剔除
+某個節點——量出來的差異是拿去跟「雜訊底噪」比較的：如果連拿掉一個誠實
+節點都會造成不小的變化，代表這套量測方法本身雜訊很大，拿它來判斷「這個
+節點可疑」會不準。要變成真正的 ERR/LFR，還缺：(1) 每一輪即時算 impact，
+不是跑完整個 10 輪才算一次；(2) 依 impact 排序，選出最大的 c 個節點；
+(3) 把這 c 個節點從這一輪的聚合裡真的排除掉，不是像現在這樣拿掉之後重跑
+一次獨立的訓練。
+
+這是重做原本的留一法量測——那一次直接呼叫 Flower 官方的 aggregate()，重現
+了跟 aggregate_bagging_verified() 同樣的 bug（只取到每個模型裡從未更新過
+的舊樹），量到的 impact 是合併邏輯壞掉產生的雜訊，不是真實訊號。這支腳本
+在修正後的 pipeline 上重新量一次，符號慣例（Impact_i = F1_A − F1_Bi）
+跟原本一致。
+
+完整調查過程見 notes/12-baseline.md、notes/13a-bagging-baseline.md。
 """
 import csv
 import os
@@ -52,12 +51,11 @@ RESULTS_DIR = os.path.join(os.path.dirname(BASE_DIR), "results")
 NUM_ROUNDS = 10
 SERVER_ADDRESS = "127.0.0.1:8080"
 VAL_DATA_PATH = os.path.join(BASE_DIR, "split_data", "chunk_6.csv")
-# 是 0.5，不是 1/client 數（0.2）——notes/13a-leaf-scale-fix.md 掃描過
-# {1/5, 1/3, 1/2, 1}：前三個都穩定收斂，而且 F1／reconnaissance recall
-# 都隨係數增加單調變好，一路到 1/2（三個穩定值裡最高的）都還在變好，所以
-# 1/2 是實際測過的四個值裡最好的，不是「除以 client 數」這個理論推出來的值。
-# leaf_scale=1（不縮放）會重現原本的 margin 暴衝問題——見 server.py 的
-# scale_leaf_values() docstring。
+# 是 0.5，不是 1/client 數（0.2）——掃描過 {1/5, 1/3, 1/2, 1} 四個值：前
+# 三個都穩定收斂，而且 F1／reconnaissance recall 都隨係數增加單調變好，
+# 一路到 1/2（三個穩定值裡最高的）都還在變好，所以 1/2 是實際測過的四個
+# 值裡最好的，不是「除以 client 數」這個理論推出來的值。leaf_scale=1（不
+# 縮放）會重現原本的 margin 暴衝問題。完整掃描結果見 notes/13a-leaf-scale-fix.md。
 LEAF_SCALE = 0.5
 
 ALL_CLIENTS = [1, 2, 3, 4, 5]
