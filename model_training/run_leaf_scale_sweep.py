@@ -1,22 +1,21 @@
-"""Sweep leaf_scale in {1/5, 1/3, 1/2, 1} to fix the margin-explosion problem
-found in notes/13a-bagging-baseline.md (5 clients' independent corrections
-are summed, not averaged, each round -- see server.py's
-scale_leaf_values()/XGBoostBaggingStrategy docstrings for the mechanism).
+"""掃描 leaf_scale ∈ {1/5, 1/3, 1/2, 1}，修正 notes/13a-bagging-baseline.md
+發現的 margin 暴衝問題（5 個 client 每輪各自獨立修正，伺服器把結果加總、
+不是平均——機制細節見 server.py 的 scale_leaf_values()／
+XGBoostBaggingStrategy 的 docstring）。
 
-Deliberately does NOT call split.py: split_data/chunk_*.csv already exists
-from a previous run, and split.py's chunking has no fixed random seed
-(notes/12-baseline.md), so re-splitting between sweep values would confound
-"effect of leaf_scale" with "effect of a different data split". All four
-sweep values below train/evaluate on the exact same chunk_1..6.csv already
-on disk.
+刻意不呼叫 split.py：split_data/chunk_*.csv 已經是前一次執行留下來的，
+而且 split.py 的切分沒有固定隨機種子（notes/12-baseline.md）——如果在
+掃描不同 leaf_scale 值之間重新切分，會把「leaf_scale 造成的效果」跟
+「換了一份資料切分造成的效果」混在一起，分不清楚是哪個原因。下面四個
+掃描值全部沿用磁碟上既有的同一份 chunk_1..6.csv 訓練與評估。
 
-Each config gets its own model_dir (so initialize_parameters() doesn't
-resume from a previous sweep value's model) and its own log dir under
-logs/leaf_scale_<label>/. Per-round accuracy/F1/margin are parsed out of
-the server's own stdout ("[Info] Round N bagging-merged ..." lines, see
-server.py) into results/leaf_scale_summary.csv; round-10 per-attack-type
-recall is captured via analyze_recall_by_attack.py into
-results/leaf_scale_<label>_recall.txt.
+每個設定各自用一個全新的 model_dir（不然 initialize_parameters() 會接著
+前一個掃描值留下的模型繼續訓練），以及自己的 log 目錄
+（logs/leaf_scale_<label>/）。逐輪的 accuracy/F1/margin 是從伺服器自己的
+stdout 解析出來的（「[Info] Round N bagging-merged ...」這幾行 log，見
+server.py），寫進 results/leaf_scale_summary.csv；第 10 輪的逐攻擊類型
+recall 則另外用 analyze_recall_by_attack.py 算出來，存進
+results/leaf_scale_<label>_recall.txt。
 """
 import csv
 import os
@@ -32,7 +31,7 @@ NUM_ROUNDS = 10
 SERVER_ADDRESS = "127.0.0.1:8080"
 VAL_DATA_PATH = os.path.join(BASE_DIR, "split_data", "chunk_6.csv")
 
-# (label used in dir/file names, actual w passed to --leaf_scale)
+# （標籤用在資料夾／檔名裡，實際傳進 --leaf_scale 的是 w 這個數值）
 SWEEP_VALUES = [
     ("1-5", 1.0 / 5.0),
     ("1-3", 1.0 / 3.0),
@@ -63,8 +62,8 @@ def run_one(label, w, summary_rows):
     model_dir = os.path.join(BASE_DIR, f"model_leaf_scale_{label}")
     log_dir = os.path.join(BASE_DIR, "logs", f"leaf_scale_{label}")
     os.makedirs(log_dir, exist_ok=True)
-    # fresh model_dir per sweep value -- initialize_parameters() would
-    # otherwise resume from a previous value's global_model_latest.ubj
+    # 每個掃描值都用全新的 model_dir——不然 initialize_parameters() 會接著
+    # 前一個掃描值留下的 global_model_latest.ubj 繼續訓練，不是從頭開始
     if os.path.isdir(model_dir):
         import shutil
         shutil.rmtree(model_dir)
