@@ -1,6 +1,26 @@
 """Leave-one-out impact of each honest client on the FIXED bagging pipeline
 (leaf_scale=0.5, see notes/13a-leaf-scale-fix.md -- w=0.5 finalized there).
 
+中文導讀：
+吃什麼：這支腳本不接受參數，設定寫死在檔案開頭常數（`LEAF_SCALE`、
+    `ALL_CLIENTS` 等）——實際的輸入是磁碟上既有的 `split_data/chunk_1.csv`
+    ~`chunk_6.csv`（5 個 client 的訓練資料 + 1 份伺服器驗證資料），不會重新
+    切分。
+吐什麼：`results/loo_impact_summary.csv`（六組設定 × 10 輪的逐輪
+    accuracy/f1/margin），以及印在終端機上的一張 impact 表（`config`／`F1`／
+    `Impact(A-Bi)`）。
+中間轉換：對六組設定（候選 A：全部 5 個 client；候選 B_1~B_5：各排除一個
+    client）分別跑一次完整的 10 輪聯邦 bagging 訓練（真的啟動 server.py +
+    對應數量的 client.py 子行程，不是模擬），全部跑完之後比較每組的
+    round-10 F1。
+在流程裡的位置：這是 ERR/LFR 的核心動作（拿掉一個節點、重新聚合、比較跟
+    「全部保留」的差異）已經在跑，但目前只是**量測**——把量出來的差異拿去
+    跟「沒有拿掉任何節點」的雜訊底噪比較，不是拿去**決定要不要真的剔除某個
+    節點**。要變成真正的 ERR/LFR，還缺：(1) 每一輪即時算 impact，不是跑完
+    整個 10 輪才算一次；(2) 依 impact 排序，選出最大的 c 個節點；(3) 把這
+    c 個節點從這一輪的聚合裡真的排除掉，不是像現在這樣拿掉之後重跑一次
+    獨立的訓練。
+
 Redo of the LOO measurement in notes/12-baseline.md's "留一法（bagging LOO）"
 section, which used Flower's OFFICIAL aggregate() applied ONCE to each
 client's already-cumulative round-10 model -- that reproduces the exact bug
@@ -48,6 +68,12 @@ CONFIGS = [("A", ALL_CLIENTS)] + [
     (f"B_{i}", [c for c in ALL_CLIENTS if c != i]) for i in ALL_CLIENTS
 ]
 
+
+# 這個正則表達式綁死 server.py 的 log 字串格式（XGBoostBaggingStrategy.
+# aggregate_fit() 裡那行 print）——server.py 的 log 文字如果之後改了措辭，
+# 這裡會安靜地配不到任何東西（finditer 回傳空結果，不會報錯），不會有任何
+# 提示告訴你資料是空的，這是已知的脆弱點（notes/16-code-review-guide.md
+# Part B 第 3 項）。
 ROUND_RE = re.compile(
     r"\[Info\] Round (\d+) bagging-merged \d+ client models "
     r"\(accuracy=([\d.]+), f1=([\d.]+), margin=\[(-?[\d.]+), (-?[\d.]+)\], "
@@ -91,7 +117,7 @@ def run_one(label, client_ids):
         ],
         stdout=server_log, stderr=subprocess.STDOUT, cwd=BASE_DIR,
     )
-    time.sleep(3)
+    time.sleep(3)  # 讓 server 先把 gRPC port 綁好，client 才不會連線失敗
 
     client_procs = []
     client_logs = []
@@ -112,7 +138,7 @@ def run_one(label, client_ids):
         client_procs.append(proc)
 
     start = time.time()
-    timeout_s = 300
+    timeout_s = 300  # 觀察到單組實際約 40-85 秒跑完，這是留給異常情況的安全值
     while server_proc.poll() is None:
         if time.time() - start > timeout_s:
             print(f"[Warning] {label} server did not finish within {timeout_s}s, killing.")

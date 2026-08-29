@@ -71,6 +71,20 @@ def preprocess_data(df):
 def scale_leaf_values(model_json: bytes, w: float) -> bytes:
     """Scale every leaf node's value in a serialized booster's trees by w.
 
+    中文導讀：
+    吃什麼：`model_json` 是「一個 client 這一輪新增的樹」序列化成的 JSON bytes——
+        bagging 模式下 client 每輪只送新增的 `NUM_BOOST_ROUND=10` 棵樹，不是完整
+        模型（見 client.py 的 `_parameters_from_new_trees()`）；`w` 是縮放係數
+        （例如 0.5，實驗上已定案，見 notes/13a-leaf-scale-fix.md）。
+    吐什麼：結構完全相同的 JSON bytes——樹的數量、分裂結構都不變，只有每棵樹
+        葉節點的數值被乘上 `w`。
+    中間轉換：對每一棵樹，找出所有「葉節點」（`left_children[i] == -1` 的節點），
+        把該節點的 `base_weights[i]` 與 `split_conditions[i]` 兩個欄位都乘上 `w`。
+    在流程裡的位置：`server.py` 的 `aggregate_fit()`（bagging 策略）裡，在呼叫
+        `aggregate_bagging_verified()` 合併「之前」，對每個 client 這一輪送來的
+        樹批次分別呼叫一次，縮放完才送進合併函式——所以縮放的對象永遠是「單一
+        client 這一輪的新樹」，不是已經合併好的全域模型。
+
     Fixes the margin-explosion problem in notes/13a-bagging-baseline.md: 5
     clients each independently boost 10 new trees against the SAME shared
     global model every round, and aggregate_bagging_verified() sums (not
@@ -108,6 +122,25 @@ def scale_leaf_values(model_json: bytes, w: float) -> bytes:
 def aggregate_bagging_verified(bst_prev_org: Optional[bytes], bst_curr_org: bytes) -> bytes:
     """Bagging aggregation: append the trees in bst_curr_org to bst_prev_org.
 
+    中文導讀：
+    吃什麼：`bst_prev_org` 是「這一輪目前為止已經合併好的全域模型」，JSON bytes；
+        這一輪第一次呼叫時是 `None`（還沒有任何 client 合併進來）。`bst_curr_org`
+        是「這個 client 這一輪新增的樹」，JSON bytes，呼叫這個函式之前已經被
+        `scale_leaf_values()` 縮放過（見 `aggregate_fit()` 裡的呼叫順序）。
+    吐什麼：合併後的全域模型，JSON bytes——`bst_curr_org` 的樹全部接到
+        `bst_prev_org` 的樹陣列後面，樹計數、索引指標等記帳欄位同步更新。
+    中間轉換：**不重新訓練、不改變任何一棵樹本身的結構**，純粹是陣列串接——
+        把 `bst_curr_org["trees"]` 依序 append 到 `bst_prev_org["trees"]` 後面，
+        重新編號 `id`，更新 `num_trees`／`iteration_indptr`／`tree_info`。
+    在流程裡的位置：`server.py` 的 `XGBoostBaggingStrategy.aggregate_fit()`
+        裡，對這一輪收到的每個 client payload 依序呼叫一次（5 個 client 就呼叫
+        5 次），逐一疊加成這一輪的全域模型。**這個函式就是 ERR/LFR 需要的「底層
+        聚合規則」**——ERR/LFR 本身只是站在這一層之上，決定「這一輪要不要把某個
+        client 的樹排除在合併範圍外」，沒有一個能正確合併「保留下來的那些
+        client」的底層規則，ERR/LFR 沒有東西可以聚合。目前分支還沒有這層排除
+        邏輯，`run_loo_impact.py` 是用「整批排除某個 client、重跑整個 10 輪」的
+        方式模擬這件事，不是即時的逐輪排除。
+
     This is derived from Flower's official aggregate()
     (flwr/server/strategy/fedxgb_bagging.py:118-154) but fixes one thing:
     the official version decides how many trees to append by reading
@@ -131,6 +164,8 @@ def aggregate_bagging_verified(bst_prev_org: Optional[bytes], bst_curr_org: byte
     misreport. This is the same "don't trust a node's own claim, verify
     the payload itself" principle as the fallback removed in ff82d04.
     """
+    # 這一輪第一個被處理的 client：還沒有「前一個 client 合併好的模型」可以接，
+    # 這個 client 的樹本身就是這一輪的起點，直接回傳，不用跑下面的合併邏輯。
     if not bst_prev_org:
         return bst_curr_org
 
@@ -143,12 +178,26 @@ def aggregate_bagging_verified(bst_prev_org: Optional[bytes], bst_curr_org: byte
     num_new_trees = len(trees_curr)
 
     gbtree_prev["gbtree_model_param"]["num_trees"] = str(tree_num_prev + num_new_trees)
+    # iteration_indptr 記法在合併多輪之後會變得不一致（第一個 client 保留了
+    # 「每棵樹一筆」的原始記法，後續每個 client 合併時卻是「一整批新樹算一筆」）,
+    # 導致 bst.num_boosted_rounds() 之後回傳的數字沒有語意（不等於樹數也不等於
+    # 聯邦輪數）。已確認這不影響 client.py 續練時的樹切片邏輯（見
+    # notes/16-code-review-guide.md Part B 第 5 項的驗證），但如果之後有新程式碼
+    # 想拿 num_boosted_rounds() 的數字做其他判斷，要先重新檢查。
     iteration_indptr = gbtree_prev["iteration_indptr"]
     iteration_indptr.append(iteration_indptr[-1] + num_new_trees)
 
     for tree_count in range(num_new_trees):
+        # 重新編號 id：client 自己送來的樹，id 是從 0 起算的本地編號（這一批
+        # 10 棵樹各自是第 0~9 棵），接進全域模型後必須改成在「整個模型」裡的
+        # 全域序號，否則會跟 bst_prev 裡既有的樹 id 重複。
         trees_curr[tree_count]["id"] = tree_num_prev + tree_count
         gbtree_prev["trees"].append(trees_curr[tree_count])
+        # 固定寫 0，不是讀 client 送來的 tree_info：這個欄位是 XGBoost 給
+        # 多輸出模型（例如多分類）用來標記「這棵樹屬於第幾個輸出」的，這個
+        # 專案是單一輸出的二元分類（binary:logistic），永遠只有一組，寫 0
+        # 對這個用途是安全的——但沒有反過來驗證過 client 端訓練出來的
+        # tree_info 是否真的每棵都是 0，是合理推論，不是逐值核對過的事實。
         gbtree_prev["tree_info"].append(0)
 
     return bytes(json.dumps(bst_prev), "utf-8")
