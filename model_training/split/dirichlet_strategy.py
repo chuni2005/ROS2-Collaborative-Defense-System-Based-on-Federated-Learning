@@ -3,54 +3,53 @@ from pathlib import Path
 import random
 from typing import Dict, List, Tuple
 
-from .base import SplitBase
+from .splitter import SplitStrategy, Splitter
 from .structures import RowRecord
 
 
-class DirichletSplit(SplitBase):
-    def __init__(
-        self,
-        *args,
-        alpha: float = 1.0,
-        random_seed: int | None = None,
-        **kwargs,
-    ):
+class DirichletStrategy(SplitStrategy):
+    def __init__(self, alpha: float = 1.0, random_seed: int | None = None):
         if alpha <= 0:
             raise ValueError("alpha must be greater than zero.")
-        super().__init__(*args, **kwargs)
         self.alpha = alpha
         self.random = random.Random(random_seed)
 
-    def split_to_chunks(self) -> List[Tuple[Path, int]]:
-        self.distribute_chunk_size()
-        chunk_sizes = [size for _, size in self.chunk.chunk_path]
-        records_by_label = self._group_records()
+    def distribute_chunk_size(self, context: Splitter) -> None:
+        context.default_distribute_chunk_size()
+
+    def split_to_chunks(self, context: Splitter) -> List[Tuple[Path, int]]:
+        context.distribute_chunk_size()
+        chunk_sizes = [size for _, size in context.chunk.chunk_path]
+        records_by_label = self._group_records(context)
         selected_by_chunk = self._select_records(records_by_label, chunk_sizes)
         selected_offsets = set()
 
-        with open(self.temp.temp_data_path, "rb") as infile:
+        with open(context.temp.temp_data_path, "rb") as infile:
             for (chunk_file, chunk_size), records in zip(
-                self.chunk.chunk_path, selected_by_chunk
+                context.chunk.chunk_path, selected_by_chunk
             ):
                 if len(records) != chunk_size:
-                    raise RuntimeError("Dirichlet sampling produced an invalid chunk size.")
+                    raise RuntimeError(
+                        "Dirichlet sampling produced an invalid chunk size."
+                    )
 
                 with open(chunk_file, "wb") as outfile:
-                    outfile.write(self.it.header_bytes)
+                    outfile.write(context.it.header_bytes)
                     for record in records:
                         infile.seek(record.offset)
                         outfile.write(infile.read(record.length))
                         selected_offsets.add(record.offset)
 
-        self.it.records = [
-            record for record in self.it.records if record.offset not in selected_offsets
+        context.it.records = [
+            record
+            for record in context.it.records
+            if record.offset not in selected_offsets
         ]
-        self.rewrite_to_temp()
-        return self.chunk.chunk_path
+        return context.chunk.chunk_path
 
-    def _group_records(self) -> Dict[str, List[RowRecord]]:
+    def _group_records(self, context: Splitter) -> Dict[str, List[RowRecord]]:
         records_by_label: Dict[str, List[RowRecord]] = defaultdict(list)
-        for record in self.it.records:
+        for record in context.it.records:
             records_by_label[record.attack].append(record)
         for records in records_by_label.values():
             self.random.shuffle(records)
