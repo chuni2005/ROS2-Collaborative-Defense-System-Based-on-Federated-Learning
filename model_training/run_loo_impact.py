@@ -1,5 +1,5 @@
-"""Leave-one-out impact of each honest client on the FIXED bagging pipeline
-(leaf_scale=0.5, see notes/13a-leaf-scale-fix.md -- w=0.5 finalized there).
+"""修正後的 bagging pipeline（leaf_scale=0.5，見 notes/13a-leaf-scale-fix.md——
+w=0.5 已經定案）上，每個誠實 client 的留一法（leave-one-out）impact。
 
 中文導讀：
 吃什麼：這支腳本不接受參數，設定寫死在檔案開頭常數（`LEAF_SCALE`、
@@ -21,25 +21,23 @@
     c 個節點從這一輪的聚合裡真的排除掉，不是像現在這樣拿掉之後重跑一次
     獨立的訓練。
 
-Redo of the LOO measurement in notes/12-baseline.md's "留一法（bagging LOO）"
-section, which used Flower's OFFICIAL aggregate() applied ONCE to each
-client's already-cumulative round-10 model -- that reproduces the exact bug
-notes/13a-bagging-baseline.md found (aggregate() reads num_parallel_tree=1,
-so it silently takes only each model's stale first tree, not a real 10-round
-federated run). The impact numbers from that run (all 5 negative, full range
-0.000016) are noise from a broken merge, not a measurement of real per-client
-signal -- this script re-measures it on the actual fixed pipeline.
+重做 notes/12-baseline.md「留一法（bagging LOO）」一節的量測——那一節用的是
+Flower 官方的 aggregate()，對每個 client 已經累積到第 10 輪的模型只呼叫一次，
+剛好重現了 notes/13a-bagging-baseline.md 找到的那個 bug（aggregate() 讀
+num_parallel_tree=1，於是只取到每個模型裡那棵從未更新過的舊樹，不是真正跑過
+10 輪聯邦訓練）。那一次量到的 impact（全部 5 個都是負值，全距只有 0.000016）
+是合併邏輯壞掉產生的雜訊，不是真實的節點間訊號——這支腳本在修正後的 pipeline
+上重新量一次。
 
-Candidate A: 10 real federated bagging rounds with all 5 honest clients.
-Candidate B_i: same, but client i excluded from training entirely (4
-clients, --num_clients=4 so Flower's min_fit_clients matches who's actually
-connected). Both use the same split_data/chunk_*.csv already on disk (no
-re-split -- see run_leaf_scale_sweep.py's docstring for why) and the same
-leaf_scale=0.5, so the only difference between A and each B_i is the
-presence/absence of that one client's data and trees -- isolates the
-leave-one-out effect from any confound in the scaling policy itself.
+候選 A：全部 5 個誠實 client，真的跑 10 輪聯邦 bagging 訓練。
+候選 B_i：跟 A 一樣，但 client i 完全不參與訓練（4 個 client，
+--num_clients=4，讓 Flower 的 min_fit_clients 對得上實際連線的人數）。
+A 跟每個 B_i 都用磁碟上既有的同一份 split_data/chunk_*.csv（不重新切分——
+理由見 run_leaf_scale_sweep.py 的 docstring），也用同一個 leaf_scale=0.5，
+所以 A 跟 B_i 之間唯一的差異就是「有沒有那一個 client 的資料跟樹」——排除掉
+縮放係數不同這個混淆變因，才能單純看出留一法本身的效果。
 
-Impact_i = F1_A - F1_Bi, same sign convention as notes/12-baseline.md.
+Impact_i = F1_A - F1_Bi，符號慣例跟 notes/12-baseline.md 一致。
 """
 import csv
 import os
@@ -54,13 +52,12 @@ RESULTS_DIR = os.path.join(os.path.dirname(BASE_DIR), "results")
 NUM_ROUNDS = 10
 SERVER_ADDRESS = "127.0.0.1:8080"
 VAL_DATA_PATH = os.path.join(BASE_DIR, "split_data", "chunk_6.csv")
-# 0.5, not 1/num_clients (0.2) -- notes/13a-leaf-scale-fix.md swept
-# {1/5, 1/3, 1/2, 1}: the first three all converge stably, and F1/
-# reconnaissance-recall both still improve monotonically up to 1/2 (the
-# highest of the three stable values tested), so 1/2 is the best of the
-# four actually tried, not a value derived from a "divide by client count"
-# theory. leaf_scale=1 (unscaled) reproduces the original margin-explosion
-# bug -- see server.py's scale_leaf_values() docstring.
+# 是 0.5，不是 1/client 數（0.2）——notes/13a-leaf-scale-fix.md 掃描過
+# {1/5, 1/3, 1/2, 1}：前三個都穩定收斂，而且 F1／reconnaissance recall
+# 都隨係數增加單調變好，一路到 1/2（三個穩定值裡最高的）都還在變好，所以
+# 1/2 是實際測過的四個值裡最好的，不是「除以 client 數」這個理論推出來的值。
+# leaf_scale=1（不縮放）會重現原本的 margin 暴衝問題——見 server.py 的
+# scale_leaf_values() docstring。
 LEAF_SCALE = 0.5
 
 ALL_CLIENTS = [1, 2, 3, 4, 5]

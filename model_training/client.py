@@ -25,11 +25,11 @@ import traceback
 
 
 TENSOR_TYPE = "xgboost-ubj"
-NUM_BOOST_ROUND = 10  # trees added per federated round; also used to slice
-                      # out "this round's new trees" in bagging mode.
+NUM_BOOST_ROUND = 10  # 每個聯邦輪次新增的樹數；bagging 模式下也用這個數字
+                      # 切出「這一輪新增的樹」。
 
-# Positive class for precision/recall/F1 is 1 ("attack") -- must match
-# server.py's POSITIVE_CLASS. See notes/11-dataset-check.md.
+# precision/recall/F1 的正類是 1（「攻擊」）——必須跟 server.py 的
+# POSITIVE_CLASS 一致。見 notes/11-dataset-check.md。
 POSITIVE_CLASS = 1
 
 
@@ -223,14 +223,13 @@ class XGBoostClient(fl.client.Client):
         tensors = [model_bytes] if model_bytes else []
         return Parameters(tensors=tensors, tensor_type=TENSOR_TYPE)
 
-    # Bagging mode only: send just this round's newly-added trees, not the
-    # whole cumulative model. Required for server-side bagging aggregation
-    # to work correctly -- see notes/00-findings.md finding 21 and
-    # notes/13a-bagging-baseline.md for why sending the whole model breaks
-    # Flower's aggregate(). Slicing by num_boosted_rounds() is the same
-    # technique Flower's own bagging example uses (client_app.py's
-    # _local_boost()), verified empirically to correctly isolate the delta
-    # even when continuing from a previous round's model (xgb_model=...).
+    # 只在 bagging 模式用：只送這一輪新增的樹，不送整個累積的模型。伺服器端
+    # 的 bagging 聚合要正確運作，這是必要條件——為什麼送整個模型會讓 Flower
+    # 的 aggregate() 壞掉，見 notes/00-findings.md 發現 21 與
+    # notes/13a-bagging-baseline.md。用 num_boosted_rounds() 切片是 Flower
+    # 自己的 bagging 範例用的同一招（client_app.py 的 _local_boost()），
+    # 已經實測驗證過，即使是接著前一輪的模型繼續訓練（xgb_model=...），
+    # 也能正確切出這一輪新增的部分。
     def _parameters_from_new_trees(self) -> Parameters:
         if self.bst is None:
             return Parameters(tensors=[], tensor_type=TENSOR_TYPE)
@@ -251,7 +250,7 @@ class XGBoostClient(fl.client.Client):
 
         return Parameters(tensors=[model_bytes] if model_bytes else [], tensor_type=TENSOR_TYPE)
 
-    # Verified against real data in notes/12-baseline.md.
+    # 已用 notes/12-baseline.md 的真實資料驗證過。
     def _evaluate_global_on_local_test(self):
         print("[Info-Test] Server global model - local test")
         if self.bst is None:
@@ -269,12 +268,11 @@ class XGBoostClient(fl.client.Client):
         except Exception as e:
             print(f"[Warning] Global model evaluation failed: {e}")
 
-    # Verified against real data in notes/12-baseline.md.
-    # zero_division=0: precision/recall/F1 come back as 0.0 rather than
-    # raising or warning when a client's local test split (test_size=0.2 of
-    # its own chunk) happens to contain only one label -- not exercised
-    # against real data yet, so this default hasn't been checked against
-    # what our actual chunk sizes produce.
+    # 已用 notes/12-baseline.md 的真實資料驗證過。
+    # zero_division=0：某個 client 的本地測試切分（自己那份 chunk 的 20%）
+    # 剛好只有單一標籤時，precision/recall/F1 會回傳 0.0，不會拋出例外或
+    # 警告——這個邊界情況目前還沒有在真實資料上被觸發過，所以這個預設值
+    # 沒有拿我們實際的 chunk 大小驗證過。
     def _evaluate_local_test(self):
         print("[Info-Test] Client local model - local test")
         if self.bst is None:
@@ -332,9 +330,8 @@ class XGBoostClient(fl.client.Client):
         local_metrics = self._evaluate_local_test()
         self._save_model_artifact()
 
-        # winner mode sends the whole cumulative model (server picks one
-        # winner's full model as next round's starting point). bagging mode
-        # sends only this round's new trees -- see _parameters_from_new_trees.
+        # winner 模式送出整個累積的模型（伺服器挑一個贏家的完整模型當下一輪
+        # 的起點）。bagging 模式只送這一輪新增的樹——見 _parameters_from_new_trees()。
         if self.aggregation == "bagging":
             fit_parameters = self._parameters_from_new_trees()
         else:
@@ -345,13 +342,12 @@ class XGBoostClient(fl.client.Client):
             parameters=fit_parameters,
             num_examples=self.num_train,
             metrics={
-                # Observational only -- lets the server's log map Flower's
-                # internal cid to our own 1-5 numbering. Never used for
-                # scoring/trust decisions (server.py's aggregate_fit() only
-                # ranks by its own computed f1), so a lying client can't
-                # exploit this the way the removed accuracy self-report
-                # fallback could -- see server.py's comment on
-                # reported_client_id for the full reasoning.
+                # 純觀察用途——讓伺服器的 log 能把 Flower 內部的 cid 對應到
+                # 我們自己的 1-5 編號。從不用於評分或信任判斷（server.py 的
+                # aggregate_fit() 只依自己算出來的 f1 排序），所以說謊的
+                # client 沒辦法像被移除的那個 accuracy 自報 fallback 一樣
+                # 利用這個欄位——完整理由見 server.py 裡 reported_client_id
+                # 那段註解。
                 "client_id": self.client_id,
                 "accuracy": local_metrics["accuracy"],
                 "precision": local_metrics["precision"],

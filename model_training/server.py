@@ -11,11 +11,10 @@ from flwr.server.client_proxy import ClientProxy
 from sklearn.metrics import precision_score, recall_score, f1_score
 import json
 
-# Positive class for precision/recall/F1 is 1 ("attack") -- ROSPaCe's attack
-# samples are the MAJORITY class (~78%), the reverse of typical IDS datasets.
-# Precision here = "of the models's attack predictions, how many were really
-# attacks"; recall = "of the real attacks, how many did it catch". See
-# notes/11-dataset-check.md and notes/00-findings.md finding 17.
+# precision/recall/F1 的正類是 1（「攻擊」）——ROSPaCe 的攻擊樣本是多數類
+# （約佔 78%），跟一般 IDS 資料集直覺相反。這裡的 precision 是「模型判定為
+# 攻擊的裡面，有多少真的是攻擊」；recall 是「真正的攻擊裡面，抓到了多少」。
+# 見 notes/11-dataset-check.md 與 notes/00-findings.md 發現 17。
 POSITIVE_CLASS = 1
 
 
@@ -85,26 +84,23 @@ def scale_leaf_values(model_json: bytes, w: float) -> bytes:
         樹批次分別呼叫一次，縮放完才送進合併函式——所以縮放的對象永遠是「單一
         client 這一輪的新樹」，不是已經合併好的全域模型。
 
-    Fixes the margin-explosion problem in notes/13a-bagging-baseline.md: 5
-    clients each independently boost 10 new trees against the SAME shared
-    global model every round, and aggregate_bagging_verified() sums (not
-    averages) all 5 contributions -- equivalent to a 5x learning-rate
-    inflation, compounding round over round until margins saturate the
-    sigmoid (round 1: [-8, 7]; round 10: [-14214, 2283], see notes/13a).
+    修的是 notes/13a-bagging-baseline.md 發現的 margin 暴衝問題：5 個 client
+    每輪各自獨立對「同一個」共享全域模型新練 10 棵樹，aggregate_bagging_verified()
+    把 5 份修正加總（不是取平均）——等同把學習率放大 5 倍，逐輪疊加下去，直到
+    margin 大到把 sigmoid 完全飽和（round 1：[-8, 7]；round 10：
+    [-14214, 2283]，細節見 notes/13a）。
 
-    Insertion point per notes/00-findings.md finding 3/notes/02 section 4:
-    since XGBoost's prediction is base_score + sum of every tree's selected
-    leaf value, scaling all leaf values in a client's new-tree batch by w
-    BEFORE it is merged into the global model scales that batch's
-    contribution to the ensemble by exactly w -- verified empirically
-    (leaf values live in BOTH base_weights[i] and split_conditions[i] at
-    leaf nodes, i.e. where left_children[i] == -1; scaling both by w=0.3
-    on a real client_1_round_1.ubj model reproduced a margin-contribution
-    ratio of 0.29999995-0.30000004 against the unscaled model, max error
-    9e-8 -- this resolves notes/02's "[推測，待驗證]" on the leaf formula).
-    Both fields are scaled together (not just one) so a client continuing
-    to boost on top of this model later (xgb_model=...) sees a consistent
-    tree, not a base_weights/split_conditions mismatch.
+    插入點依據 notes/00-findings.md 發現 3、notes/02 第 4 節的推論：因為
+    XGBoost 的預測值是 base_score 加上每棵樹選中的葉節點值加總，在合併進全域
+    模型「之前」，把一個 client 這批新樹的所有葉節點值乘上 w，就會讓這批樹
+    對整體預測的貢獻剛好縮放 w 倍——這件事已經實測驗證過（葉節點的值同時存在
+    base_weights[i] 跟 split_conditions[i] 這兩個欄位，也就是 left_children[i]
+    == -1 的節點；對一個真實的 client_1_round_1.ubj 模型兩個欄位都乘 w=0.3，
+    量到的邊際貢獻比值是 0.29999995~0.30000004，跟理論值的最大誤差只有
+    9e-8——這解決了 notes/02 標記為「[推測，待驗證]」的葉值公式）。兩個欄位
+    一起縮放、不是只改一個，是為了讓 client 之後如果拿這個模型繼續訓練
+    （xgb_model=...），看到的樹內部兩個欄位還是一致的，不會出現
+    base_weights 跟 split_conditions 對不上的情況。
     """
     model = json.loads(bytearray(model_json))
     trees = model["learner"]["gradient_booster"]["model"]["trees"]
@@ -141,28 +137,23 @@ def aggregate_bagging_verified(bst_prev_org: Optional[bytes], bst_curr_org: byte
         邏輯，`run_loo_impact.py` 是用「整批排除某個 client、重跑整個 10 輪」的
         方式模擬這件事，不是即時的逐輪排除。
 
-    This is derived from Flower's official aggregate()
-    (flwr/server/strategy/fedxgb_bagging.py:118-154) but fixes one thing:
-    the official version decides how many trees to append by reading
-    gbtree_model_param.num_parallel_tree from bst_curr_org -- a fixed
-    XGBoost hyperparameter (how many trees to train in parallel per
-    boosting iteration, normally 1), NOT "how many new trees this
-    submission contains". It only happens to give the right answer when a
-    client trains exactly num_parallel_tree (=1) new tree per round, which
-    is what Flower's own bagging example does (local-epochs=1). Our
-    client.py trains NUM_BOOST_ROUND=10 trees per round, so that field is
-    always 1 regardless of the true delta size -- using it silently
-    merged the same stale first tree every round instead of each round's
-    actual new trees. See notes/00-findings.md finding 21 and
-    notes/13a-bagging-baseline.md for how this was found.
+    這是從 Flower 官方 aggregate()（flwr/server/strategy/fedxgb_bagging.py:
+    118-154）改的，但修了一件事：官方版本是讀 bst_curr_org 裡的
+    gbtree_model_param.num_parallel_tree 來決定要接幾棵樹——這是一個固定的
+    XGBoost 超參數（每次 boosting 疊代要平行訓練幾棵樹，正常是 1），不是
+    「這次送來的東西裡有幾棵新樹」。只有當 client 剛好每輪只訓練
+    num_parallel_tree（=1）棵新樹時，這個欄位才會剛好給出正確答案——這正是
+    Flower 自己的 bagging 範例的做法（local-epochs=1）。我們的 client.py
+    每輪訓練 NUM_BOOST_ROUND=10 棵樹，這個欄位不管實際新增了幾棵都恆為 1——
+    直接拿來用，會讓每一輪都靜默地只合併到同一棵過時的第一棵樹，不是每輪
+    真正的新樹。詳見 notes/00-findings.md 發現 21 與 notes/13a-bagging-baseline.md
+    記錄的完整發現過程。
 
-    Fix: don't read any declared/self-reported count. client.py now sends
-    ONLY this round's new trees (see _parameters_from_new_trees in
-    client.py), so the number to append is simply
-    len(trees in bst_curr_org) -- counted directly from the payload
-    actually received, not trusted from any field a client could
-    misreport. This is the same "don't trust a node's own claim, verify
-    the payload itself" principle as the fallback removed in ff82d04.
+    修法：不讀任何 client 自己宣稱或聲明的數量。client.py 現在只送出這一輪
+    新增的樹（見 client.py 的 _parameters_from_new_trees()），所以要接的
+    樹數就是 len(trees in bst_curr_org)——直接從實際收到的 payload 數出來，
+    不採信任何 client 可能謊報的欄位。這跟 ff82d04 移除的那個 fallback
+    是同一種「不相信節點自己的宣稱，親自查證 payload 本身」的原則。
     """
     # 這一輪第一個被處理的 client：還沒有「前一個 client 合併好的模型」可以接，
     # 這個 client 的樹本身就是這一輪的起點，直接回傳，不用跑下面的合併邏輯。
@@ -210,13 +201,12 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
         os.makedirs(self.model_dir, exist_ok=True)
         self.latest_model_path = os.path.join(self.model_dir, "global_model_latest.ubj")
 
-        # Fails loud instead of the old silent fallback (self.dval = None ->
-        # aggregate_fit() trusted fit_res.metrics["accuracy"], a number the
-        # client computes itself with zero server-side cross-check). A
-        # malicious client could report accuracy=1.0 without training and
-        # win max() every round -- see notes/00-findings.md finding 18 for
-        # the full attack walkthrough. This project's name has "zero-trust"
-        # in it; that fallback was the concrete counterexample.
+        # 直接報錯中止，取代舊版那個靜默的 fallback（self.dval = None ->
+        # aggregate_fit() 改成相信 fit_res.metrics["accuracy"]，一個 client
+        # 自己算出來、伺服器完全沒有交叉驗證的數字）。惡意 client 只要回報
+        # accuracy=1.0，不需要真的訓練，就能在 max() 底下每輪都贏——完整的
+        # 攻擊情境見 notes/00-findings.md 發現 18。這個專題的名字裡有「零信任」
+        # 三個字，那個 fallback 正是這個精神的具體反例。
         if not val_data_path or not os.path.exists(val_data_path):
             raise FileNotFoundError(
                 f"Server-side validation data not found at {val_data_path!r}. "
@@ -267,12 +257,11 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
             return None
         return bytes(parameters.tensors[0])
 
-    # Verified against real data in notes/12-baseline.md (two full 10-round
-    # runs, baseline_run1/run2). zero_division=0 means precision/recall/F1
-    # come back as 0.0 (not a warning or exception) when a class is entirely
-    # absent from y_true or
-    # from the predictions, e.g. a validation chunk or client test split that
-    # happens to contain only one label. Not exercised against real data yet.
+    # 已用 notes/12-baseline.md 的真實資料驗證過（兩次完整的 10 輪執行，
+    # baseline_run1/run2）。zero_division=0 代表某個類別在 y_true 或預測值
+    # 裡完全缺席時（例如驗證集或 client 本地測試切分剛好只有單一標籤），
+    # precision/recall/F1 會回傳 0.0（不是警告或例外）——這個邊界情況目前
+    # 還沒有在真實資料上被真正觸發過，沒有實測驗證。
     def _evaluate_model_on_server(self, model_bytes: bytes) -> Dict[str, float]:
         zero_metrics = {
             "accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0,
@@ -324,12 +313,11 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
             payload = self._extract_payload(fit_res.parameters)
             if payload:
                 server_metrics = self._evaluate_model_on_server(payload)
-                # reported_client_id is ONLY for logging/identification in this
-                # experiment (all 5 clients are honest here) -- it is NOT used
-                # for scoring or trust decisions, so it does not reintroduce the
-                # self-report fallback removed in commit ff82d04. A malicious
-                # client could still lie about this field; if task 13 needs the
-                # mapping to be trustworthy under attack, it can't rely on this.
+                # reported_client_id 在這個實驗裡只用來記錄／識別身分
+                # （5 個 client 目前都是誠實的）——完全不用於評分或信任判斷，
+                # 所以不會重新打開 commit ff82d04 移除的那個自報 fallback 漏洞。
+                # 惡意 client 依然可以在這個欄位上說謊；如果任務 13 需要這個
+                # 對應關係在有攻擊時也可信，不能依賴這個欄位。
                 reported_client_id = (fit_res.metrics or {}).get("client_id", "?")
                 print(
                     f"[Server Eval] Client {client_proxy.cid} (client_id={reported_client_id}) "
@@ -340,10 +328,9 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
                 )
                 payloads.append((payload, server_metrics, client_proxy.cid, reported_client_id))
 
-        # Ranking key switched from accuracy to F1 -- see
-        # notes/11-dataset-check.md "誠實模型的 accuracy 基準線" and
-        # notes/12-baseline.md (verified: judgment gap vs. the "always
-        # predict attack" floor is ~19.6 F1 points, well above noise).
+        # 排序依據從 accuracy 換成 F1——見 notes/11-dataset-check.md「誠實模型的
+        # accuracy 基準線」一節，以及 notes/12-baseline.md（已驗證：判斷空間跟
+        # 「永遠回答攻擊」這個地板分相差約 19.6 個 F1 百分點，遠高於雜訊範圍）。
         best_payload, best_metrics, best_cid, best_client_id = max(payloads, key=lambda item: item[1]["f1"])
 
         model_path = os.path.join(self.model_dir, f"global_model_round_{server_round}.ubj")
@@ -364,56 +351,48 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
 
 
 class XGBoostBaggingStrategy(XGBoostStrategy):
-    """Bagging aggregation baseline for notes/13a-bagging-baseline.md.
+    """notes/13a-bagging-baseline.md 的 bagging 聚合 baseline。
 
-    aggregate_fit() concatenates every client's new trees into the running
-    global model each round -- no client is ever discarded, unlike
-    XGBoostStrategy's max() which keeps only one winner.
+    aggregate_fit() 每一輪把每個 client 的新樹接進正在跑的全域模型——沒有
+    任何一個 client 會被丟掉，跟 XGBoostStrategy 用 max() 只留一個贏家不同。
 
-    Two things had to be fixed relative to a first attempt that just used
-    Flower's official aggregate() directly (see notes/00-findings.md
-    finding 21, notes/13a-bagging-baseline.md for the full investigation):
+    相較於一開始直接套用 Flower 官方 aggregate() 的做法，有兩件事必須修正
+    （完整調查過程見 notes/00-findings.md 發現 21、notes/13a-bagging-baseline.md）：
 
-    1. Merge logic: Flower's official aggregate() decides how many trees
-       to append by reading gbtree_model_param.num_parallel_tree -- a fixed
-       XGBoost hyperparameter (normally 1), not "how many new trees this
-       submission has". With this project's NUM_BOOST_ROUND=10, that field
-       is always 1 regardless of true delta size, so it silently merged
-       the same stale first tree every round. aggregate_bagging_verified()
-       (above) fixes this by counting len(trees) in the actual payload
-       instead -- ground truth from the payload's own structure, never
-       trusted from any client-declared value or hyperparameter that
-       doesn't reflect it.
-    2. Wire format: client.py now sends only this round's new trees (see
-       _parameters_from_new_trees), not the whole cumulative model --
-       required for (1) to have a well-defined "how many new trees" to
-       count in the first place.
+    1. 合併邏輯：Flower 官方的 aggregate() 讀 gbtree_model_param.
+       num_parallel_tree 來決定要接幾棵樹——這是一個固定的 XGBoost 超參數
+       （正常是 1），不是「這次送來的東西裡有幾棵新樹」。這個專案的
+       NUM_BOOST_ROUND=10，這個欄位不管實際新增了幾棵永遠是 1，直接拿來用
+       會讓每一輪都靜默地合併到同一棵過時的舊樹。上面的
+       aggregate_bagging_verified() 改成直接數實際 payload 裡的 len(trees)——
+       這是從 payload 本身的結構得到的事實，不採信任何 client 宣稱的值，
+       也不採信反映不出實際情況的超參數。
+    2. 傳輸格式：client.py 現在只送出這一輪新增的樹（見
+       _parameters_from_new_trees()），不是送整個累積的模型——這是第 1 點
+       「有幾棵新樹」這個問題本身要有明確定義的前提。
 
-    Flower's aggregate() parses model bytes with json.loads(), so bagging
-    needs JSON, not the UBJ bytes this project's tensor_type="xgboost-ubj"
-    actually transmits. Verified empirically that loading UBJ bytes into a
-    Booster and re-serializing via save_raw("json") converts correctly,
-    and converting the merged JSON result back via save_raw("ubj")
-    round-trips losslessly (predictions identical) -- confirmed with a
-    synthetic model before relying on it here. The round-trip back to UBJ
-    is necessary because client.py's _load_model_from_bytes() loads by
-    file path with a ".ubj" suffix, and xgboost's load_model(path) trusts
-    the extension -- JSON content in a ".ubj"-named file fails to load
-    (tested directly: json.cc parse error), so the wire format must stay
-    real UBJ.
+    Flower 的 aggregate() 用 json.loads() 解析模型 bytes，所以 bagging 需要
+    JSON 格式，不是這個專案 tensor_type="xgboost-ubj" 實際傳輸用的 UBJ
+    bytes。已經實測驗證過：把 UBJ bytes 載入 Booster、再用 save_raw("json")
+    重新序列化，轉換是正確的；把合併後的 JSON 結果用 save_raw("ubj") 轉回去，
+    也是無損的往返轉換（預測結果完全相同）——這件事在真正依賴它之前，先用一個
+    合成模型確認過。轉回 UBJ 這一步是必要的，因為 client.py 的
+    _load_model_from_bytes() 是照檔名副檔名 ".ubj" 來載入的，xgboost 的
+    load_model(path) 會相信這個副檔名——JSON 內容放進一個叫 ".ubj" 的檔案
+    會直接載入失敗（直接測試過：json.cc 解析錯誤），所以傳輸格式必須維持
+    真正的 UBJ。
     """
 
     def __init__(self, model_dir: str, num_clients: int, val_data_path: Optional[str] = None,
                  leaf_scale: float = 1.0):
         super().__init__(model_dir, num_clients, val_data_path)
         self.global_model_json: Optional[bytes] = None
-        # See scale_leaf_values() docstring and notes/13a-bagging-baseline.md
-        # "未解問題" 1 -- fixes the margin-explosion problem from summing
-        # (not averaging) 5 clients' independent corrections each round.
-        # Configurable, NOT hardcoded to 1/num_clients: that's one
-        # hypothesis (matches NVFlare's lr_mode="uniform" default, see
-        # notes/03/notes/00-findings.md finding 5), not an established fact
-        # for this codebase's num_boost_round=10-per-round setup.
+        # 見 scale_leaf_values() docstring 與 notes/13a-bagging-baseline.md
+        # 的「未解問題」1——修的是「5 個 client 每輪各自獨立修正，伺服器
+        # 加總而非取平均」造成的 margin 暴衝問題。做成可設定的參數，不寫死
+        # 1/client 數：後者只是一個假設（跟 NVFlare 的 lr_mode="uniform"
+        # 預設值一樣，見 notes/03、notes/00-findings.md 發現 5），對這個
+        # 專案 num_boost_round=10-每輪 的設定來說不是已經證實的事實。
         self.leaf_scale = leaf_scale
 
     def aggregate_fit(
@@ -430,17 +409,14 @@ class XGBoostBaggingStrategy(XGBoostStrategy):
         if failures:
             print(f"[Warning] Round {server_round} had {len(failures)} client failure(s): {failures}")
 
-        # Each client now sends ONLY this round's new trees (see
-        # client.py's _parameters_from_new_trees), so the payload here is
-        # NOT a full model -- evaluating it against chunk_6 in isolation
-        # would not mean "this client's model quality" (a lone tree slice's
-        # raw output isn't a meaningful probability without the rest of the
-        # ensemble it was boosted on top of), so that per-client eval step
-        # from the winner-take-all strategy is intentionally dropped here.
-        # What's logged instead is the tree count actually found in each
-        # payload -- counted from the payload itself, never from anything
-        # a client declares -- so a mismatch (e.g. a client sending more or
-        # fewer trees than expected) is visible in the log.
+        # 現在每個 client 只送出這一輪新增的樹（見 client.py 的
+        # _parameters_from_new_trees()），所以這裡的 payload 不是一個完整的
+        # 模型——單獨拿去對 chunk_6 評估，不代表「這個 client 的模型品質」
+        # （一段樹的片段本身，脫離它接續訓練的那個整體，輸出的原始值不是有
+        # 意義的機率），所以贏者全拿策略裡那個逐 client 評估的步驟，這裡是
+        # 刻意拿掉的。改成印出每個 payload 裡實際找到的樹數——直接從 payload
+        # 本身數出來，不採信任何 client 自己宣稱的數字——這樣如果有 client
+        # 送來的樹數比預期多或少，log 裡看得出來。
         merged_json = self.global_model_json
         for client_proxy, fit_res in results:
             payload = self._extract_payload(fit_res.parameters)
@@ -458,20 +434,18 @@ class XGBoostBaggingStrategy(XGBoostStrategy):
                 f"sent {num_trees_received} tree(s) this round."
             )
 
-            # Scale THIS client's new-tree batch before merging -- server-side,
-            # not client-side, so a malicious client can't opt out of the
-            # scaling by simply not applying it (zero-trust, same rationale
-            # as len(trees_curr) below not trusting any client-declared
-            # count -- see aggregate_bagging_verified()'s docstring).
+            # 合併前先縮放「這個」client 的新樹批次——在伺服器端做，不在
+            # client 端做，這樣惡意 client 就不能單純不套用縮放來規避
+            # （零信任，跟下面 len(trees_curr) 不採信任何 client 宣稱的數量
+            # 是同一個道理——見 aggregate_bagging_verified() 的 docstring）。
             payload_json = scale_leaf_values(payload_json, self.leaf_scale)
 
             merged_json = aggregate_bagging_verified(merged_json, payload_json)
 
         self.global_model_json = merged_json
 
-        # Convert the merged model back to real UBJ bytes for wire
-        # transmission -- see class docstring for why this round-trip
-        # is required rather than optional.
+        # 把合併後的模型轉回真正的 UBJ bytes 才能傳輸——為什麼這個往返轉換
+        # 是必要的、不是可有可無，見 class docstring。
         bst_merged = xgb.Booster()
         bst_merged.load_model(bytearray(merged_json))
         merged_ubj = bytes(bst_merged.save_raw("ubj"))
