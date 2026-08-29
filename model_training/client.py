@@ -345,6 +345,13 @@ class XGBoostClient(fl.client.Client):
             parameters=fit_parameters,
             num_examples=self.num_train,
             metrics={
+                # Observational only -- lets the server's log map Flower's
+                # internal cid to our own 1-5 numbering. Never used for
+                # scoring/trust decisions (server.py's aggregate_fit() only
+                # ranks by its own computed f1), so a lying client can't
+                # exploit this the way the removed accuracy self-report
+                # fallback could -- see server.py's comment on
+                # reported_client_id for the full reasoning.
                 "client_id": self.client_id,
                 "accuracy": local_metrics["accuracy"],
                 "precision": local_metrics["precision"],

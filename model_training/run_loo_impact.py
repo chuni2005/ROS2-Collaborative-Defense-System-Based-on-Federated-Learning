@@ -34,6 +34,13 @@ RESULTS_DIR = os.path.join(os.path.dirname(BASE_DIR), "results")
 NUM_ROUNDS = 10
 SERVER_ADDRESS = "127.0.0.1:8080"
 VAL_DATA_PATH = os.path.join(BASE_DIR, "split_data", "chunk_6.csv")
+# 0.5, not 1/num_clients (0.2) -- notes/13a-leaf-scale-fix.md swept
+# {1/5, 1/3, 1/2, 1}: the first three all converge stably, and F1/
+# reconnaissance-recall both still improve monotonically up to 1/2 (the
+# highest of the three stable values tested), so 1/2 is the best of the
+# four actually tried, not a value derived from a "divide by client count"
+# theory. leaf_scale=1 (unscaled) reproduces the original margin-explosion
+# bug -- see server.py's scale_leaf_values() docstring.
 LEAF_SCALE = 0.5
 
 ALL_CLIENTS = [1, 2, 3, 4, 5]

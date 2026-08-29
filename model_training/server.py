@@ -161,6 +161,13 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
         os.makedirs(self.model_dir, exist_ok=True)
         self.latest_model_path = os.path.join(self.model_dir, "global_model_latest.ubj")
 
+        # Fails loud instead of the old silent fallback (self.dval = None ->
+        # aggregate_fit() trusted fit_res.metrics["accuracy"], a number the
+        # client computes itself with zero server-side cross-check). A
+        # malicious client could report accuracy=1.0 without training and
+        # win max() every round -- see notes/00-findings.md finding 18 for
+        # the full attack walkthrough. This project's name has "zero-trust"
+        # in it; that fallback was the concrete counterexample.
         if not val_data_path or not os.path.exists(val_data_path):
             raise FileNotFoundError(
                 f"Server-side validation data not found at {val_data_path!r}. "
