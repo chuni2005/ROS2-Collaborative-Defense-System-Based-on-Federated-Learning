@@ -68,39 +68,27 @@ def preprocess_data(df):
 
 
 def scale_leaf_values(model_json: bytes, w: float) -> bytes:
-    """Scale every leaf node's value in a serialized booster's trees by w.
+    """把一批樹的所有葉節點值乘上 w，讓這批樹對預測結果的影響縮小成 w 倍。
 
-    中文導讀：
-    吃什麼：`model_json` 是「一個 client 這一輪新增的樹」序列化成的 JSON bytes——
-        bagging 模式下 client 每輪只送新增的 `NUM_BOOST_ROUND=10` 棵樹，不是完整
-        模型（見 client.py 的 `_parameters_from_new_trees()`）；`w` 是縮放係數
-        （例如 0.5，實驗上已定案，見 notes/13a-leaf-scale-fix.md）。
-    吐什麼：結構完全相同的 JSON bytes——樹的數量、分裂結構都不變，只有每棵樹
-        葉節點的數值被乘上 `w`。
-    中間轉換：對每一棵樹，找出所有「葉節點」（`left_children[i] == -1` 的節點），
-        把該節點的 `base_weights[i]` 與 `split_conditions[i]` 兩個欄位都乘上 `w`。
-    在流程裡的位置：`server.py` 的 `aggregate_fit()`（bagging 策略）裡，在呼叫
-        `aggregate_bagging_verified()` 合併「之前」，對每個 client 這一輪送來的
-        樹批次分別呼叫一次，縮放完才送進合併函式——所以縮放的對象永遠是「單一
-        client 這一輪的新樹」，不是已經合併好的全域模型。
+    原理：XGBoost 的預測值 = base_score + 每棵樹走到的葉節點值加總。
+    所以把葉節點值乘 0.5，這批樹的影響力就剛好變成一半。
 
-    修的是 notes/13a-bagging-baseline.md 發現的 margin 暴衝問題：5 個 client
-    每輪各自獨立對「同一個」共享全域模型新練 10 棵樹，aggregate_bagging_verified()
-    把 5 份修正加總（不是取平均）——等同把學習率放大 5 倍，逐輪疊加下去，直到
-    margin 大到把 sigmoid 完全飽和（round 1：[-8, 7]；round 10：
-    [-14214, 2283]，細節見 notes/13a）。
+    輸入：model_json — 一個節點這輪新練的 10 棵樹，序列化成 JSON bytes
+          w          — 縮放係數，目前用 0.5
+    輸出：結構完全一樣的 JSON bytes，只有葉節點的數值變了
 
-    插入點依據 notes/00-findings.md 發現 3、notes/02 第 4 節的推論：因為
-    XGBoost 的預測值是 base_score 加上每棵樹選中的葉節點值加總，在合併進全域
-    模型「之前」，把一個 client 這批新樹的所有葉節點值乘上 w，就會讓這批樹
-    對整體預測的貢獻剛好縮放 w 倍——這件事已經實測驗證過（葉節點的值同時存在
-    base_weights[i] 跟 split_conditions[i] 這兩個欄位，也就是 left_children[i]
-    == -1 的節點；對一個真實的 client_1_round_1.ubj 模型兩個欄位都乘 w=0.3，
-    量到的邊際貢獻比值是 0.29999995~0.30000004，跟理論值的最大誤差只有
-    9e-8——這解決了 notes/02 標記為「[推測，待驗證]」的葉值公式）。兩個欄位
-    一起縮放、不是只改一個，是為了讓 client 之後如果拿這個模型繼續訓練
-    （xgb_model=...），看到的樹內部兩個欄位還是一致的，不會出現
-    base_weights 跟 split_conditions 對不上的情況。
+    怎麼認出葉節點：XGBoost 把一棵樹存成幾個平行的陣列。
+    left_children[i] == -1 代表第 i 個節點沒有左子樹，也就是葉節點。
+    葉節點的值同時存在 base_weights[i] 和 split_conditions[i] 兩個欄位
+    （XGBoost 的內部設計，同一個數字放兩個地方），兩個都要改——
+    只改一個的話，節點之後拿這個模型繼續訓練時會讀到不一致的值。
+
+    為什麼需要縮放：5 個節點每輪各自對同一個全域模型練 10 棵樹，
+    伺服器把 5 份都接起來，等於學習率變成 5 倍。幾輪之後預測值會爆掉——
+    實測不縮放時第 10 輪的 margin 範圍是 [-14214, 2283]，
+    正常應該在 [-10, 10] 附近。
+
+    完整調查過程見 notes/13a-leaf-scale-fix.md。
     """
     model = json.loads(bytearray(model_json))
     trees = model["learner"]["gradient_booster"]["model"]["trees"]
@@ -116,47 +104,52 @@ def scale_leaf_values(model_json: bytes, w: float) -> bytes:
 
 
 def aggregate_bagging_verified(bst_prev_org: Optional[bytes], bst_curr_org: bytes) -> bytes:
-    """Bagging aggregation: append the trees in bst_curr_org to bst_prev_org.
+    """把兩批樹接在一起，變成一個更大的模型，同時更新幾個記帳用的欄位。
 
-    中文導讀：
-    吃什麼：`bst_prev_org` 是「這一輪目前為止已經合併好的全域模型」，JSON bytes；
-        這一輪第一次呼叫時是 `None`（還沒有任何 client 合併進來）。`bst_curr_org`
-        是「這個 client 這一輪新增的樹」，JSON bytes，呼叫這個函式之前已經被
-        `scale_leaf_values()` 縮放過（見 `aggregate_fit()` 裡的呼叫順序）。
-    吐什麼：合併後的全域模型，JSON bytes——`bst_curr_org` 的樹全部接到
-        `bst_prev_org` 的樹陣列後面，樹計數、索引指標等記帳欄位同步更新。
-    中間轉換：**不重新訓練、不改變任何一棵樹本身的結構**，純粹是陣列串接——
-        把 `bst_curr_org["trees"]` 依序 append 到 `bst_prev_org["trees"]` 後面，
-        重新編號 `id`，更新 `num_trees`／`iteration_indptr`／`tree_info`。
-    在流程裡的位置：`server.py` 的 `XGBoostBaggingStrategy.aggregate_fit()`
-        裡，對這一輪收到的每個 client payload 依序呼叫一次（5 個 client 就呼叫
-        5 次），逐一疊加成這一輪的全域模型。**這個函式就是 ERR/LFR 需要的「底層
-        聚合規則」**——ERR/LFR 本身只是站在這一層之上，決定「這一輪要不要把某個
-        client 的樹排除在合併範圍外」，沒有一個能正確合併「保留下來的那些
-        client」的底層規則，ERR/LFR 沒有東西可以聚合。目前分支還沒有這層排除
-        邏輯，`run_loo_impact.py` 是用「整批排除某個 client、重跑整個 10 輪」的
-        方式模擬這件事，不是即時的逐輪排除。
+    原理：一個 XGBoost 模型的預測值是 base_score 加上模型裡每一棵樹的貢獻
+    加總，所有的樹放在同一個陣列裡，樹跟樹之間互不影響、彼此獨立。所以
+    「合併兩個模型」在結構上就是「把兩個樹陣列接起來」，不需要重新訓練，
+    也不會改變任何一棵樹本身的內容。
 
-    這是從 Flower 官方 aggregate()（flwr/server/strategy/fedxgb_bagging.py:
-    118-154）改的，但修了一件事：官方版本是讀 bst_curr_org 裡的
-    gbtree_model_param.num_parallel_tree 來決定要接幾棵樹——這是一個固定的
-    XGBoost 超參數（每次 boosting 疊代要平行訓練幾棵樹，正常是 1），不是
-    「這次送來的東西裡有幾棵新樹」。只有當 client 剛好每輪只訓練
-    num_parallel_tree（=1）棵新樹時，這個欄位才會剛好給出正確答案——這正是
-    Flower 自己的 bagging 範例的做法（local-epochs=1）。我們的 client.py
-    每輪訓練 NUM_BOOST_ROUND=10 棵樹，這個欄位不管實際新增了幾棵都恆為 1——
-    直接拿來用，會讓每一輪都靜默地只合併到同一棵過時的第一棵樹，不是每輪
-    真正的新樹。詳見 notes/00-findings.md 發現 21 與 notes/13a-bagging-baseline.md
-    記錄的完整發現過程。
+    輸入：bst_prev_org — 這一輪目前為止已經合併好的全域模型，JSON bytes；
+          這一輪第一個被處理的節點時是 None（還沒有任何樹被接進來）
+          bst_curr_org — 剛收到的一個節點這一輪新練的樹，JSON bytes
+          （已經被 scale_leaf_values() 縮放過）
+    輸出：合併後的模型，JSON bytes——bst_curr_org 的樹全部接到
+          bst_prev_org 的樹陣列後面
 
-    修法：不讀任何 client 自己宣稱或聲明的數量。client.py 現在只送出這一輪
-    新增的樹（見 client.py 的 _parameters_from_new_trees()），所以要接的
-    樹數就是 len(trees in bst_curr_org)——直接從實際收到的 payload 數出來，
-    不採信任何 client 可能謊報的欄位。這跟 ff82d04 移除的那個 fallback
-    是同一種「不相信節點自己的宣稱，親自查證 payload 本身」的原則。
+    怎麼做：一個 XGBoost 模型的 JSON 裡，跟樹有關的幾個欄位都在
+    learner.gradient_booster.model 底下：
+
+    - trees：所有樹的陣列，每一棵樹是一個字典（分裂條件、左右子節點、
+      葉值等）
+    - gbtree_model_param.num_trees：字串形式記下目前模型總共有幾棵樹
+    - iteration_indptr：一個遞增的索引陣列，記錄「第幾次訓練疊代」對應到
+      trees 陣列的哪個區間（正常訓練時，一次疊代通常對應一棵新樹）
+    - tree_info：每棵樹屬於哪個輸出群組的編號（只有多分類這種多輸出模型
+      才會用到多個群組；這個專案是二元分類，永遠只有一組，固定是 0）
+
+    合併步驟：如果 bst_prev_org 是 None，代表沒有東西可以接，直接把
+    bst_curr_org 當這一輪的起點回傳。否則，數出 bst_curr_org 裡有幾棵新樹
+    （num_new_trees），把 num_trees 加上這個數字，在 iteration_indptr 後面
+    補一筆（代表這批新樹佔用的疊代區間），然後逐棵把新樹接到 bst_prev_org
+    的 trees 陣列後面——同時把每棵樹的 id 改成接在 bst_prev_org 現有樹後面
+    的全域序號（避免跟已經存在的樹編號重複），並在 tree_info 補一筆 0。
+
+    為什麼需要它：這是整個 bagging 聚合的地基——沒有這個函式，就沒有辦法讓
+    多個節點的訓練成果同時保留在同一個全域模型裡（相對於「只挑一個贏家」的
+    做法）。這也是之後 ERR/LFR 要用到的底層聚合規則：ERR/LFR 決定的是
+    「這一輪要不要把某個節點的樹排除在合併範圍外」，實際「怎麼把留下來的樹
+    接起來」還是要靠這個函式。
+
+    這是從 Flower 官方的 aggregate() 改的：官方版本靠 num_parallel_tree 這個
+    固定超參數（通常是 1）判斷要接幾棵樹，只有在「每個節點每輪只新練 1 棵樹」
+    時才會給出正確答案，我們每輪新練 10 棵，直接套用會每輪都只接到同一棵
+    舊樹。這裡改成直接數 bst_curr_org 裡實際有幾棵樹，不依賴任何可能不準確
+    或可能被節點謊報的欄位。
+
+    完整調查過程見 notes/13a-bagging-baseline.md、notes/16-code-review-guide.md。
     """
-    # 這一輪第一個被處理的 client：還沒有「前一個 client 合併好的模型」可以接，
-    # 這個 client 的樹本身就是這一輪的起點，直接回傳，不用跑下面的合併邏輯。
     if not bst_prev_org:
         return bst_curr_org
 
@@ -169,26 +162,23 @@ def aggregate_bagging_verified(bst_prev_org: Optional[bytes], bst_curr_org: byte
     num_new_trees = len(trees_curr)
 
     gbtree_prev["gbtree_model_param"]["num_trees"] = str(tree_num_prev + num_new_trees)
-    # iteration_indptr 記法在合併多輪之後會變得不一致（第一個 client 保留了
-    # 「每棵樹一筆」的原始記法，後續每個 client 合併時卻是「一整批新樹算一筆」）,
-    # 導致 bst.num_boosted_rounds() 之後回傳的數字沒有語意（不等於樹數也不等於
-    # 聯邦輪數）。已確認這不影響 client.py 續練時的樹切片邏輯（見
-    # notes/16-code-review-guide.md Part B 第 5 項的驗證），但如果之後有新程式碼
-    # 想拿 num_boosted_rounds() 的數字做其他判斷，要先重新檢查。
+    # 注意：第一個節點是整批（10 筆）算一次疊代，但因為 bst_prev_org 是
+    # None 時上面直接回傳原始 JSON，第一個節點自己送來的 iteration_indptr
+    # 其實是「一棵樹一筆」的原始記法——兩種記法混在一起，合併幾輪之後
+    # bst.num_boosted_rounds() 回傳的數字會失去意義（不等於樹數，也不等於
+    # 聯邦輪數）。已確認這不影響下面 client.py 續練時用來切樹的邏輯，但如果
+    # 之後有新程式碼想拿這個數字做其他判斷，要先重新檢查。
     iteration_indptr = gbtree_prev["iteration_indptr"]
     iteration_indptr.append(iteration_indptr[-1] + num_new_trees)
 
     for tree_count in range(num_new_trees):
-        # 重新編號 id：client 自己送來的樹，id 是從 0 起算的本地編號（這一批
-        # 10 棵樹各自是第 0~9 棵），接進全域模型後必須改成在「整個模型」裡的
-        # 全域序號，否則會跟 bst_prev 裡既有的樹 id 重複。
+        # 節點送來的 id 是從 0 起算的本地編號（這一批 10 棵樹各自是第
+        # 0~9 棵），這裡改成接在 bst_prev 現有樹後面的全域序號。
         trees_curr[tree_count]["id"] = tree_num_prev + tree_count
         gbtree_prev["trees"].append(trees_curr[tree_count])
-        # 固定寫 0，不是讀 client 送來的 tree_info：這個欄位是 XGBoost 給
-        # 多輸出模型（例如多分類）用來標記「這棵樹屬於第幾個輸出」的，這個
-        # 專案是單一輸出的二元分類（binary:logistic），永遠只有一組，寫 0
-        # 對這個用途是安全的——但沒有反過來驗證過 client 端訓練出來的
-        # tree_info 是否真的每棵都是 0，是合理推論，不是逐值核對過的事實。
+        # 固定寫 0，不是讀節點送來的 tree_info——沒有反過來驗證過節點端
+        # 訓練出來的 tree_info 是否真的每棵都是 0，是合理推論，不是逐值
+        # 核對過的事實。
         gbtree_prev["tree_info"].append(0)
 
     return bytes(json.dumps(bst_prev), "utf-8")
@@ -351,48 +341,35 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
 
 
 class XGBoostBaggingStrategy(XGBoostStrategy):
-    """notes/13a-bagging-baseline.md 的 bagging 聚合 baseline。
+    """每一輪把所有節點新練的樹全部接進全域模型，沒有任何節點被丟掉。
 
-    aggregate_fit() 每一輪把每個 client 的新樹接進正在跑的全域模型——沒有
-    任何一個 client 會被丟掉，跟 XGBoostStrategy 用 max() 只留一個贏家不同。
+    跟 XGBoostStrategy（贏者全拿）的差別：XGBoostStrategy 的 aggregate_fit()
+    用 max() 在所有節點的模型裡只挑一個分數最高的當全域模型，其餘節點這一輪
+    等於白練；這個策略改成把每個節點的新樹全部接在一起（透過
+    aggregate_bagging_verified()，見上方函式），全域模型的樹會一輪一輪
+    累積增加。
 
-    相較於一開始直接套用 Flower 官方 aggregate() 的做法，有兩件事必須修正
-    （完整調查過程見 notes/00-findings.md 發現 21、notes/13a-bagging-baseline.md）：
+    這裡多一層傳輸格式轉換：合併用的 aggregate_bagging_verified() 只能處理
+    JSON 格式的模型（用 json.loads() 解析），但這個專案節點之間實際傳輸模型
+    用的 tensor_type="xgboost-ubj" 是 UBJ 二進位格式，不是 JSON。所以
+    aggregate_fit() 裡每收到一個節點的模型，要先轉成 JSON 才能合併
+    （bst.save_raw("json")），全部節點都合併完之後，再把結果轉回 UBJ
+    （bst.save_raw("ubj")）才能送給下一輪的節點。轉回 UBJ 是必要的、不能省略：
+    節點載入模型時是照檔名副檔名 ".ubj" 判斷格式的，如果檔案內容其實是
+    JSON，會直接載入失敗。
 
-    1. 合併邏輯：Flower 官方的 aggregate() 讀 gbtree_model_param.
-       num_parallel_tree 來決定要接幾棵樹——這是一個固定的 XGBoost 超參數
-       （正常是 1），不是「這次送來的東西裡有幾棵新樹」。這個專案的
-       NUM_BOOST_ROUND=10，這個欄位不管實際新增了幾棵永遠是 1，直接拿來用
-       會讓每一輪都靜默地合併到同一棵過時的舊樹。上面的
-       aggregate_bagging_verified() 改成直接數實際 payload 裡的 len(trees)——
-       這是從 payload 本身的結構得到的事實，不採信任何 client 宣稱的值，
-       也不採信反映不出實際情況的超參數。
-    2. 傳輸格式：client.py 現在只送出這一輪新增的樹（見
-       _parameters_from_new_trees()），不是送整個累積的模型——這是第 1 點
-       「有幾棵新樹」這個問題本身要有明確定義的前提。
+    已經實測驗證過這個 UBJ→JSON→UBJ 的往返轉換不會遺失任何資訊（轉換前後
+    模型的預測結果逐筆相同）。
 
-    Flower 的 aggregate() 用 json.loads() 解析模型 bytes，所以 bagging 需要
-    JSON 格式，不是這個專案 tensor_type="xgboost-ubj" 實際傳輸用的 UBJ
-    bytes。已經實測驗證過：把 UBJ bytes 載入 Booster、再用 save_raw("json")
-    重新序列化，轉換是正確的；把合併後的 JSON 結果用 save_raw("ubj") 轉回去，
-    也是無損的往返轉換（預測結果完全相同）——這件事在真正依賴它之前，先用一個
-    合成模型確認過。轉回 UBJ 這一步是必要的，因為 client.py 的
-    _load_model_from_bytes() 是照檔名副檔名 ".ubj" 來載入的，xgboost 的
-    load_model(path) 會相信這個副檔名——JSON 內容放進一個叫 ".ubj" 的檔案
-    會直接載入失敗（直接測試過：json.cc 解析錯誤），所以傳輸格式必須維持
-    真正的 UBJ。
+    完整調查過程見 notes/13a-bagging-baseline.md。
     """
 
     def __init__(self, model_dir: str, num_clients: int, val_data_path: Optional[str] = None,
                  leaf_scale: float = 1.0):
         super().__init__(model_dir, num_clients, val_data_path)
         self.global_model_json: Optional[bytes] = None
-        # 見 scale_leaf_values() docstring 與 notes/13a-bagging-baseline.md
-        # 的「未解問題」1——修的是「5 個 client 每輪各自獨立修正，伺服器
-        # 加總而非取平均」造成的 margin 暴衝問題。做成可設定的參數，不寫死
-        # 1/client 數：後者只是一個假設（跟 NVFlare 的 lr_mode="uniform"
-        # 預設值一樣，見 notes/03、notes/00-findings.md 發現 5），對這個
-        # 專案 num_boost_round=10-每輪 的設定來說不是已經證實的事實。
+        # 做成可設定的參數，不寫死成 1/節點數：後者只是一個假設，掃描過
+        # 幾個候選值後發現不是最好的——見 notes/13a-leaf-scale-fix.md。
         self.leaf_scale = leaf_scale
 
     def aggregate_fit(
@@ -401,7 +378,24 @@ class XGBoostBaggingStrategy(XGBoostStrategy):
         results: List[Tuple[ClientProxy, FitRes]],
         failures: List[BaseException],
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
+        """把這一輪收到的每個節點的新樹，依序縮放、合併，變成新的全域模型。
 
+        Flower 每一輪呼叫一次這個方法。results 是這一輪所有節點回傳的訓練
+        結果；每個節點的 FitRes.parameters 裡裝的不是完整模型，是這個節點
+        這一輪新練的樹（UBJ bytes，見 client.py 的 _parameters_from_new_trees()）。
+
+        怎麼做：對 results 裡每一個節點的 payload，先轉成 JSON（因為
+        aggregate_bagging_verified() 只認 JSON），印出這個節點實際送來幾棵
+        樹（直接從 payload 數出來，不採信任何節點自己宣稱的數字），呼叫
+        scale_leaf_values() 縮放這批新樹的葉節點值，再呼叫
+        aggregate_bagging_verified() 接進正在累積的全域模型 merged_json。
+        全部節點都處理完之後，把最終結果轉回 UBJ，存檔、在伺服器驗證集上
+        評估、回傳給 Flower。
+
+        沒有對單一節點的 payload 個別評估分數（不像贏者全拿策略那樣印出
+        每個節點的分數）：因為這裡的 payload 只是一段樹的片段，不是完整
+        模型，脫離它接續訓練的那個整體，單獨拿去預測沒有意義。
+        """
         if not results:
             print(f"[Warning] Round {server_round} has no fit results to aggregate.")
             return None, {}
@@ -409,14 +403,6 @@ class XGBoostBaggingStrategy(XGBoostStrategy):
         if failures:
             print(f"[Warning] Round {server_round} had {len(failures)} client failure(s): {failures}")
 
-        # 現在每個 client 只送出這一輪新增的樹（見 client.py 的
-        # _parameters_from_new_trees()），所以這裡的 payload 不是一個完整的
-        # 模型——單獨拿去對 chunk_6 評估，不代表「這個 client 的模型品質」
-        # （一段樹的片段本身，脫離它接續訓練的那個整體，輸出的原始值不是有
-        # 意義的機率），所以贏者全拿策略裡那個逐 client 評估的步驟，這裡是
-        # 刻意拿掉的。改成印出每個 payload 裡實際找到的樹數——直接從 payload
-        # 本身數出來，不採信任何 client 自己宣稱的數字——這樣如果有 client
-        # 送來的樹數比預期多或少，log 裡看得出來。
         merged_json = self.global_model_json
         for client_proxy, fit_res in results:
             payload = self._extract_payload(fit_res.parameters)
@@ -434,10 +420,10 @@ class XGBoostBaggingStrategy(XGBoostStrategy):
                 f"sent {num_trees_received} tree(s) this round."
             )
 
-            # 合併前先縮放「這個」client 的新樹批次——在伺服器端做，不在
-            # client 端做，這樣惡意 client 就不能單純不套用縮放來規避
-            # （零信任，跟下面 len(trees_curr) 不採信任何 client 宣稱的數量
-            # 是同一個道理——見 aggregate_bagging_verified() 的 docstring）。
+            # 合併前先縮放「這個」節點的新樹批次——在伺服器端做，不在
+            # 節點端做，這樣惡意節點就不能單純不套用縮放來規避（零信任，
+            # 跟 aggregate_bagging_verified() 不採信任何節點宣稱的樹數量
+            # 是同一個道理）。
             payload_json = scale_leaf_values(payload_json, self.leaf_scale)
 
             merged_json = aggregate_bagging_verified(merged_json, payload_json)
