@@ -41,6 +41,7 @@ ROUND_RE = re.compile(
 
 
 def stop_process(proc):
+    """終止子行程，先 terminate，5 秒沒關掉就 kill。"""
     if proc is None or proc.poll() is not None:
         return
     proc.terminate()
@@ -52,6 +53,22 @@ def stop_process(proc):
 
 
 def main():
+    """跑一次完整的 10 輪贏者全拿（--aggregation=winner）聯邦訓練，解析
+    伺服器 log 取得每輪贏家的 accuracy/f1，並對第 10 輪模型跑一次逐攻擊
+    類型 recall 分析。
+
+    輸入：無參數，設定寫死在檔案開頭常數。
+    輸出：無回傳值。副作用包括：寫 log 到 logs/baseline_reseed/、把訓練
+    出的模型存到 model_baseline_reseed/、把逐攻擊類型 recall 寫到
+    results/baseline_reseed_recall.txt，並把逐輪結果印到終端機。
+
+    怎麼做分成幾個階段：
+        # --- 啟動 server（winner 模式） ---
+        # --- 啟動全部 5 個 client（winner 模式） ---
+        # --- 等 server 結束或逾時、收拾所有子行程 ---
+        # --- 解析 server log 取得每輪贏家的 accuracy/f1 ---
+        # --- 對第 10 輪的模型跑逐攻擊類型 recall 分析 ---
+    """
     os.makedirs(RESULTS_DIR, exist_ok=True)
     model_dir = os.path.join(BASE_DIR, "model_baseline_reseed")
     log_dir = os.path.join(BASE_DIR, "logs", "baseline_reseed")
@@ -60,6 +77,7 @@ def main():
         shutil.rmtree(model_dir)
     os.makedirs(model_dir, exist_ok=True)
 
+    # --- 啟動 server（winner 模式） ---
     server_log_path = os.path.join(log_dir, "server.log")
     server_log = open(server_log_path, "w", encoding="utf-8")
     server_proc = subprocess.Popen(
@@ -76,6 +94,7 @@ def main():
     )
     time.sleep(3)
 
+    # --- 啟動全部 5 個 client（winner 模式） ---
     client_procs = []
     client_logs = []
     for i in range(1, NUM_CLIENTS + 1):
@@ -94,6 +113,7 @@ def main():
         )
         client_procs.append(proc)
 
+    # --- 等 server 結束或逾時、收拾所有子行程 ---
     start = time.time()
     timeout_s = 300
     while server_proc.poll() is None:
@@ -111,12 +131,14 @@ def main():
     for cl in client_logs:
         cl.close()
 
+    # --- 解析 server log 取得每輪贏家的 accuracy/f1 ---
     with open(server_log_path, "r", encoding="utf-8") as f:
         server_text = f.read()
     for m in ROUND_RE.finditer(server_text):
         rnd, cid, acc, f1 = m.groups()
         print(f"round {rnd}: client_id={cid} accuracy={acc} f1={f1}")
 
+    # --- 對第 10 輪的模型跑逐攻擊類型 recall 分析 ---
     round10_model = os.path.join(model_dir, f"global_model_round_{NUM_ROUNDS}.ubj")
     if os.path.exists(round10_model):
         result = subprocess.run(

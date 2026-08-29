@@ -36,7 +36,6 @@ F1_Bi，正值代表拿掉這個節點讓模型變差，負值代表拿掉反而
 在修正後的 pipeline 上重新量一次，符號慣例（Impact_i = F1_A − F1_Bi）
 跟原本一致。
 
-完整調查過程見 notes/12-baseline.md、notes/13a-bagging-baseline.md。
 """
 import csv
 import os
@@ -77,6 +76,7 @@ ROUND_RE = re.compile(
 
 
 def stop_process(proc):
+    """終止子行程，先 terminate，5 秒沒關掉就 kill。"""
     if proc is None or proc.poll() is not None:
         return
     proc.terminate()
@@ -88,6 +88,22 @@ def stop_process(proc):
 
 
 def run_one(label, client_ids):
+    """跑一組留一法設定（候選 A 或某個排除節點 i 的 B_i）的完整 10 輪
+    聯邦 bagging 訓練，解析伺服器 log 取得逐輪指標。
+
+    輸入：label 是這組設定的檔名/資料夾用標籤（"A" 或 "B_i"）；client_ids
+    是這組設定實際要啟動的節點編號列表。
+    輸出：這組設定逐輪的指標，一個 list of dict（每輪一筆，含 config、
+    excluded_client、round、accuracy、f1、margin_min、margin_max、
+    margin_mean）。副作用包括寫 log 到 logs/loo_<label>/、把訓練出的模型
+    存到 model_loo_<label>/。
+
+    怎麼做分成幾個階段：
+        # --- 啟動 server（num_clients 對齊實際節點數） ---
+        # --- 啟動 client_ids 裡指定的每個 client ---
+        # --- 等 server 結束或逾時、收拾所有子行程 ---
+        # --- 解析 server log 取得逐輪指標並回傳 ---
+    """
     num_clients = len(client_ids)
     print(f"\n===== {label}: clients={client_ids} (num_clients={num_clients}) =====", flush=True)
     model_dir = os.path.join(BASE_DIR, f"model_loo_{label}")
@@ -97,6 +113,7 @@ def run_one(label, client_ids):
         shutil.rmtree(model_dir)
     os.makedirs(model_dir, exist_ok=True)
 
+    # --- 啟動 server（num_clients 對齊實際節點數） ---
     server_log_path = os.path.join(log_dir, "server.log")
     server_log = open(server_log_path, "w", encoding="utf-8")
     server_proc = subprocess.Popen(
@@ -114,6 +131,7 @@ def run_one(label, client_ids):
     )
     time.sleep(3)  # 讓 server 先把 gRPC port 綁好，client 才不會連線失敗
 
+    # --- 啟動 client_ids 裡指定的每個 client ---
     client_procs = []
     client_logs = []
     for i in client_ids:
@@ -132,6 +150,7 @@ def run_one(label, client_ids):
         )
         client_procs.append(proc)
 
+    # --- 等 server 結束或逾時、收拾所有子行程 ---
     start = time.time()
     timeout_s = 300  # 觀察到單組實際約 40-85 秒跑完，這是留給異常情況的安全值
     while server_proc.poll() is None:
@@ -149,6 +168,7 @@ def run_one(label, client_ids):
     for cl in client_logs:
         cl.close()
 
+    # --- 解析 server log 取得逐輪指標並回傳 ---
     with open(server_log_path, "r", encoding="utf-8") as f:
         server_text = f.read()
     rows = []
@@ -163,6 +183,11 @@ def run_one(label, client_ids):
 
 
 def main():
+    """依序對 CONFIGS（候選 A 加上每個排除單一節點的 B_i）呼叫
+    run_one()，把全部結果寫成 results/loo_impact_summary.csv，再取每組
+    第 10 輪的 F1，印出每個 B_i 相對 A 的 impact
+    （Impact_i = F1_A − F1_Bi）。
+    """
     os.makedirs(RESULTS_DIR, exist_ok=True)
     all_rows = []
     for label, client_ids in CONFIGS:

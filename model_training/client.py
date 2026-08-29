@@ -83,6 +83,24 @@ def preprocess_data(df):
 
 
 def load_local_data(client_id, data_path, eval_data_path=None):
+    """讀取一個節點自己的本地資料，切成訓練／驗證／本地測試三份 DMatrix。
+
+    輸入：client_id 用來當 train_test_split 的隨機種子（讓每個節點的切分
+    可重現、節點之間彼此不同）；data_path 是這個節點自己的訓練資料 CSV
+    （split_data/chunk_N.csv）；eval_data_path 目前沒有使用（永遠回傳
+    None，是保留給未來外部評估集用的參數）。
+    輸出：一個 9 元組 (dtrain, dval, dtest_local, deval_external,
+    y_eval_external, 訓練筆數, 本地測試筆數, 本地測試真實標籤)；
+    deval_external／y_eval_external 目前固定是 None。
+
+    怎麼做：先用 preprocess_data() 清理資料，切出 features／label；用兩次
+    train_test_split 依 80/20 再 75/25 的比例切成 訓練:驗證:測試 =
+    60:20:20；can_stratify／can_stratify_2 檢查該次切分的標籤是否至少
+    兩類、每類至少兩筆，只有滿足才用 stratify 分層抽樣，避免資料筆數太少
+    或只剩單一類別時 train_test_split 直接拋例外；最後印出各切分的標籤
+    分布，以及 train/test 之間依特徵值判斷的重複筆數，供人工檢查資料切分
+    是否合理。
+    """
     print(f"\n[Info] [Client {client_id}] Loading local training data: {data_path}")
 
     df_train_raw = pd.read_csv(data_path, low_memory=False)
@@ -134,8 +152,16 @@ def load_local_data(client_id, data_path, eval_data_path=None):
 
 
 class XGBoostClient(fl.client.Client):
+    """Flower 的 client 端實作，包一個 XGBoost Booster，負責本地訓練、
+    序列化模型給伺服器、以及在自己的本地測試集上評估。
+    """
 
     def __init__(self, client_id, data_path, eval_data_path=None, aggregation="winner"):
+        """載入這個節點的本地資料（三份切分都在 load_local_data() 裡完成），
+        並固定 XGBoost 的訓練超參數（objective=binary:logistic、eta=0.1、
+        max_depth=5、tree_method=hist）。aggregation 參數決定 fit() 最後要
+        送整個模型還是只送新樹（見 _parameters_from_new_trees()）。
+        """
         self.client_id = client_id
         self.aggregation = aggregation
 
@@ -152,6 +178,13 @@ class XGBoostClient(fl.client.Client):
         }
 
     def _load_model_from_bytes(self, model_bytes):
+        """把伺服器傳來的模型 bytes 還原成一個 XGBoost Booster。
+
+        XGBoost 的 Booster.load_model() 只接受檔案路徑，沒有直接從記憶體
+        bytes 讀取的 API，所以這裡先寫進一個暫存檔、讀回來、再刪掉暫存檔。
+        model_bytes 是空值時直接回傳 None；載入過程拋例外時記錄失敗次數並
+        回傳 None，不會讓呼叫端崩潰。
+        """
         if not model_bytes:
             return None
 
@@ -178,6 +211,12 @@ class XGBoostClient(fl.client.Client):
                 os.remove(tmp_file)
 
     def _serialize_model_to_bytes(self):
+        """把 self.bst 存成 bytes，供 Parameters 物件裝載傳給伺服器。
+
+        跟 _load_model_from_bytes() 對稱：XGBoost 的 save_model() 只能存到
+        檔案，沒有直接輸出 bytes 的 API，所以一樣先存暫存檔、讀回 bytes、
+        再刪掉暫存檔。self.bst 是 None 時回傳空 bytes b""。
+        """
         if self.bst is None:
             return b""
 
@@ -194,6 +233,15 @@ class XGBoostClient(fl.client.Client):
                 os.remove(tmp_file)
 
     def _save_model_artifact(self):
+        """印出這個節點目前模型最重要的 15 個特徵（依 gain 排序），並把
+        模型存成 output_models/client_{id}_round_{round}.ubj 留底。
+
+        下面雖然有一段 `if self.bst is None: return None`，但那段檢查寫在
+        `self.bst.get_score(...)` 之後——self.bst 真的是 None 時會先在
+        get_score() 那行拋 AttributeError，不會走到這個檢查。目前唯一呼叫點
+        在 fit() 訓練完之後，self.bst 不會是 None，所以這個順序問題還沒有
+        實際發生過。
+        """
         importance = self.bst.get_score(importance_type='gain')
         sorted_importance = sorted(importance.items(), key=lambda x: x[1], reverse=True)
         print("Top 15 features by gain:")
@@ -212,6 +260,9 @@ class XGBoostClient(fl.client.Client):
         return artifact_path
 
     def _set_booster_from_parameters(self, parameters: Parameters):
+        """把伺服器傳來的 Parameters 還原成 self.bst；parameters 是 None
+        或沒有 tensors 時，self.bst 設回 None（代表要從空模型開始練）。
+        """
         if parameters is not None and parameters.tensors:
             model_bytes = bytes(parameters.tensors[0])
             self.bst = self._load_model_from_bytes(model_bytes)
@@ -219,6 +270,10 @@ class XGBoostClient(fl.client.Client):
             self.bst = None
 
     def _parameters_from_booster(self) -> Parameters:
+        """把 self.bst 整個模型包成 Parameters 物件
+        （tensor_type="xgboost-ubj"），winner 模式下用來把累積至今的
+        完整模型送給伺服器。
+        """
         model_bytes = self._serialize_model_to_bytes()
         tensors = [model_bytes] if model_bytes else []
         return Parameters(tensors=tensors, tensor_type=TENSOR_TYPE)
@@ -273,6 +328,10 @@ class XGBoostClient(fl.client.Client):
         return Parameters(tensors=[model_bytes] if model_bytes else [], tensor_type=TENSOR_TYPE)
 
     def _evaluate_global_on_local_test(self):
+        """印出目前 self.bst（收到的全域模型）在這個節點自己本地測試集上的
+        accuracy/precision/recall/F1，純觀察用途，結果不會被送回伺服器或
+        用於任何判斷。self.bst 是 None 時只印警告、不計算。
+        """
         print("[Info-Test] Server global model - local test")
         if self.bst is None:
             print("[Warning] Global model is None, skipping evaluation on local test set.")
@@ -294,6 +353,15 @@ class XGBoostClient(fl.client.Client):
     # 警告——這個邊界情況目前還沒有在真實資料上被觸發過，所以這個預設值
     # 沒有拿我們實際的 chunk 大小驗證過。
     def _evaluate_local_test(self):
+        """計算 self.bst 在本地測試集上的 logloss、accuracy、precision、
+        recall、F1，回傳成 dict。
+
+        logloss 是手動用二元交叉熵公式算的（XGBoost 的 eval_metric 只在
+        訓練時的 evals 列表裡起作用，這裡是訓練後單獨對測試集算，所以自己
+        實作一次）；preds_prob_clipped 把機率夾在 [1e-7, 1-1e-7] 之間，
+        避免 log(0) 造成 inf。self.bst 是 None 或計算過程拋例外時，回傳
+        全部指標為 0（logloss 為 1.0）的預設 dict，不會讓呼叫端崩潰。
+        """
         print("[Info-Test] Client local model - local test")
         if self.bst is None:
             print("[Warning] Local model is None, skipping evaluation on local test set.")
@@ -327,6 +395,10 @@ class XGBoostClient(fl.client.Client):
             return {"logloss": 1.0, "accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0}
 
     def get_parameters(self, ins: GetParametersIns) -> GetParametersRes:
+        """Flower 的 GetParametersIns/Res 介面方法：回傳 self.bst 目前的
+        模型（透過 _parameters_from_booster()），供伺服器在訓練開始前取得
+        初始模型。
+        """
         parameters = self._parameters_from_booster()
         return GetParametersRes(
             status=Status(code=Code.OK, message="Success"),
@@ -334,12 +406,24 @@ class XGBoostClient(fl.client.Client):
         )
 
     def fit(self, ins: FitIns) -> FitRes:
+        """Flower 每輪呼叫一次：載入伺服器送來的全域模型、在本地資料上續練
+        NUM_BOOST_ROUND 棵新樹、把結果（依 aggregation 模式決定送整個模型
+        或只送新樹）回傳給伺服器。
+
+        輸入：ins.parameters 是伺服器目前的全域模型。
+        輸出：FitRes，包含要送給伺服器的模型/樹片段，以及這個節點在本地
+        測試集上算出的 accuracy/precision/recall/f1/logloss 等 metrics
+        （client_id 只是方便伺服器 log 對照用，見 server.py 的
+        reported_client_id 說明）。
+        """
+        # --- 還原全域模型、評估更新前的表現 ---
         self.current_round += 1
         print(f"\n[Client {self.client_id}] Recieve Server Message - {self.current_round} Round Fit Start")
 
         self._set_booster_from_parameters(ins.parameters)
         self._evaluate_global_on_local_test()
 
+        # --- 用本地資料續練 NUM_BOOST_ROUND 棵新樹 ---
         print(f"[Info] [Client {self.client_id}] Training...")
         self.bst = xgb.train(
             self.params, self.dtrain, num_boost_round=NUM_BOOST_ROUND,
@@ -347,9 +431,11 @@ class XGBoostClient(fl.client.Client):
             xgb_model=self.bst, verbose_eval=False
         )
 
+        # --- 在本地測試集上評估、存檔留底 ---
         local_metrics = self._evaluate_local_test()
         self._save_model_artifact()
 
+        # --- 依 aggregation 模式組裝要送出的 Parameters ---
         # winner 模式送出整個累積的模型（伺服器挑一個贏家的完整模型當下一輪
         # 的起點）。bagging 模式只送這一輪新增的樹——見 _parameters_from_new_trees()。
         if self.aggregation == "bagging":
@@ -379,6 +465,15 @@ class XGBoostClient(fl.client.Client):
         )
 
     def evaluate(self, ins: EvaluateIns) -> EvaluateRes:
+        """Flower 的 EvaluateIns/Res 介面方法：把伺服器傳來的模型跑一次
+        本地測試集評估，回傳 loss（logloss）與 accuracy/precision/recall/f1。
+        self.bst 還原失敗（None）時回傳 loss=1.0、num_examples=0、指標全 0，
+        不會拋例外。
+
+        在這個專案裡目前沒有被實際呼叫——server.py 的
+        fraction_evaluate=0.0、min_evaluate_clients=0（見
+        XGBoostStrategy.__init__()），Flower 不會對任何節點呼叫這個方法。
+        """
         self._set_booster_from_parameters(ins.parameters)
 
         if self.bst is None:

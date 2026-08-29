@@ -31,6 +31,12 @@ import server as srv
 
 
 def main():
+    """指令列進入點：載入 --model_path 指定的模型，對 --val_data_path 的
+    驗證資料逐攻擊類型計算「被判定為攻擊」的比例（對 observe 這個比例是
+    假陽性率 FPR，對其餘攻擊類型是 recall），結果印在終端機（不寫檔，寫
+    檔由呼叫端負責，例如 run_leaf_scale_sweep.py 會把這支腳本的 stdout
+    導進自己的 recall 檔案）。
+    """
     parser = argparse.ArgumentParser(description="Per-attack-type recall/FPR + margin stats for one model.")
     parser.add_argument("--model_path", required=True, help="Path to a .ubj booster file.")
     parser.add_argument("--val_data_path", default="split_data/chunk_6.csv",

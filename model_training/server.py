@@ -87,8 +87,6 @@ def scale_leaf_values(model_json: bytes, w: float) -> bytes:
     伺服器把 5 份都接起來，等於學習率變成 5 倍。幾輪之後預測值會爆掉——
     實測不縮放時第 10 輪的 margin 範圍是 [-14214, 2283]，
     正常應該在 [-10, 10] 附近。
-
-    完整調查過程見 notes/13a-leaf-scale-fix.md。
     """
     model = json.loads(bytearray(model_json))
     trees = model["learner"]["gradient_booster"]["model"]["trees"]
@@ -185,7 +183,24 @@ def aggregate_bagging_verified(bst_prev_org: Optional[bytes], bst_curr_org: byte
 
 
 class XGBoostStrategy(fl.server.strategy.FedAvg):
+    """贏者全拿聚合策略：每輪只保留伺服器驗證集上 F1 最高的單一節點模型。
+
+    繼承 Flower 的 FedAvg，但 aggregate_fit() 沒有真的做平均——用 max() 在
+    所有節點回傳的模型裡，挑伺服器自己算出來的 F1 最高的一個，整個取代全域
+    模型，其餘節點這一輪等於白練。這是目前系統的既有行為（相對於下面
+    XGBoostBaggingStrategy 的 bagging 合併）。
+    """
+
     def __init__(self, model_dir: str, num_clients: int, val_data_path: Optional[str] = None):
+        """載入伺服器端驗證資料，並以此為前提初始化 FedAvg 策略。
+
+        model_dir 用來存每一輪的全域模型；val_data_path 是伺服器自己持有的
+        乾淨驗證集，找不到就直接拋 FileNotFoundError 中止——不會退回去相信
+        client 自己回報的 accuracy 來選模型（那個 fallback 已經因為零信任的
+        理由被移除，見下方 aggregate_fit() 裡 reported_client_id 附近的說明）。
+        fraction_fit=1.0、min_fit_clients=num_clients 代表每輪要求所有節點都
+        參與訓練。
+        """
         self.num_clients = num_clients
         self.model_dir = os.path.abspath(model_dir)
         os.makedirs(self.model_dir, exist_ok=True)
@@ -252,6 +267,18 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
     # 會回傳 0.0（不是警告或例外）——這個邊界情況目前還沒有在真實資料上被
     # 真正觸發過，沒有實測驗證。完整驗證紀錄見 notes/12-baseline.md。
     def _evaluate_model_on_server(self, model_bytes: bytes) -> Dict[str, float]:
+        """在伺服器自己持有的驗證集上評估一個模型，回傳 accuracy/precision/
+        recall/F1 與預測 margin 的統計量。
+
+        輸入：model_bytes — 一個完整 XGBoost 模型的序列化 bytes。
+        輸出：一個 dict，鍵包含 accuracy、precision、recall、f1、margin_min、
+        margin_max、margin_mean；self.dval 是 None 或載入/預測過程拋例外時，
+        回傳全部欄位是 0.0 的 zero_metrics，不會讓呼叫端崩潰。
+
+        margin 是 output_margin=True 的原始分數（sigmoid 之前的值），用來
+        觀察模型是否穩定收斂——不縮放的話這個值可能爆到遠超正常範圍，見
+        scale_leaf_values() 的說明。
+        """
         zero_metrics = {
             "accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0,
             "margin_min": 0.0, "margin_max": 0.0, "margin_mean": 0.0,
@@ -289,6 +316,20 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
         results: List[Tuple[ClientProxy, FitRes]],
         failures: List[BaseException],
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
+        """Flower 每輪呼叫一次：把這一輪所有節點回傳的模型逐一用伺服器驗證集
+        評分，只留下 F1 最高的一個當作新的全域模型。
+
+        輸入：results 是這一輪收到的 (ClientProxy, FitRes) 配對列表，每個
+        FitRes.parameters 裝的是該節點目前完整的模型（不是新樹片段，因為
+        winner 模式的 client.py 每次都送整個模型）。
+        輸出：(Parameters, metrics dict)——Parameters 只包著贏家的模型
+        bytes；metrics 是贏家在伺服器驗證集上的 accuracy/precision/recall/f1。
+
+        怎麼做：對每個節點的 payload 呼叫 _evaluate_model_on_server() 算
+        分數，全部存進 payloads 列表；用 max() 依 f1 挑出最高分那筆；把它的
+        模型存成這一輪的檔案與 global_model_latest.ubj（下一輪
+        initialize_parameters() 會讀這個檔案接著訓練）。
+        """
 
         if not results:
             print(f"[Warning] Round {server_round} has no fit results to aggregate.")
@@ -365,6 +406,10 @@ class XGBoostBaggingStrategy(XGBoostStrategy):
 
     def __init__(self, model_dir: str, num_clients: int, val_data_path: Optional[str] = None,
                  leaf_scale: float = 1.0):
+        """在贏者全拿策略的初始化之上，多存一份跨輪次累積的全域模型（JSON
+        格式）與縮放係數 leaf_scale，供 aggregate_fit() 做 bagging 合併時
+        使用。
+        """
         super().__init__(model_dir, num_clients, val_data_path)
         self.global_model_json: Optional[bytes] = None
         # 做成可設定的參數，不寫死成 1/節點數：後者只是一個假設，掃描過

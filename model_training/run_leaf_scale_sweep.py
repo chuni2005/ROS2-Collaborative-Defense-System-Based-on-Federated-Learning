@@ -57,6 +57,7 @@ ROUND_RE = re.compile(
 
 
 def stop_process(proc):
+    """終止子行程，先 terminate，5 秒沒關掉就 kill。"""
     if proc is None or proc.poll() is not None:
         return
     proc.terminate()
@@ -68,6 +69,24 @@ def stop_process(proc):
 
 
 def run_one(label, w, summary_rows):
+    """跑一組 leaf_scale 設定的完整 10 輪聯邦 bagging 訓練，解析伺服器
+    log 取得逐輪指標，並對第 10 輪模型跑一次逐攻擊類型 recall 分析。
+
+    輸入：label 是這組設定的檔名/資料夾用標籤（例如 "1-2"）；w 是實際
+    傳給 server.py --leaf_scale 的縮放係數；summary_rows 是呼叫端傳進來
+    的 list，這個函式會直接把這組設定的逐輪結果 append 進去（就地修改，
+    沒有回傳值）。
+    輸出：無回傳值。副作用包括：寫 log 到 logs/leaf_scale_<label>/、把
+    訓練出的模型存到 model_leaf_scale_<label>/、把逐攻擊類型 recall 寫到
+    results/leaf_scale_<label>_recall.txt。
+
+    怎麼做分成幾個階段：
+        # --- 啟動 server（帶這組的 --leaf_scale） ---
+        # --- 啟動全部 5 個 client ---
+        # --- 等 server 結束或逾時、收拾所有子行程 ---
+        # --- 解析 server log 取得逐輪 accuracy/f1/margin ---
+        # --- 對第 10 輪的模型跑逐攻擊類型 recall 分析 ---
+    """
     print(f"\n===== leaf_scale={w:.6f} (label={label}) =====", flush=True)
     model_dir = os.path.join(BASE_DIR, f"model_leaf_scale_{label}")
     log_dir = os.path.join(BASE_DIR, "logs", f"leaf_scale_{label}")
@@ -79,6 +98,7 @@ def run_one(label, w, summary_rows):
         shutil.rmtree(model_dir)
     os.makedirs(model_dir, exist_ok=True)
 
+    # --- 啟動 server（帶這組的 --leaf_scale） ---
     server_log_path = os.path.join(log_dir, "server.log")
     server_log = open(server_log_path, "w", encoding="utf-8")
     server_proc = subprocess.Popen(
@@ -96,6 +116,7 @@ def run_one(label, w, summary_rows):
     )
     time.sleep(3)
 
+    # --- 啟動全部 5 個 client ---
     client_procs = []
     client_logs = []
     for i in range(1, NUM_CLIENTS + 1):
@@ -114,6 +135,7 @@ def run_one(label, w, summary_rows):
         )
         client_procs.append(proc)
 
+    # --- 等 server 結束或逾時、收拾所有子行程 ---
     start = time.time()
     timeout_s = 300
     while server_proc.poll() is None:
@@ -131,6 +153,7 @@ def run_one(label, w, summary_rows):
     for cl in client_logs:
         cl.close()
 
+    # --- 解析 server log 取得逐輪 accuracy/f1/margin ---
     with open(server_log_path, "r", encoding="utf-8") as f:
         server_text = f.read()
     for m in ROUND_RE.finditer(server_text):
@@ -141,6 +164,7 @@ def run_one(label, w, summary_rows):
             "margin_min": float(mmin), "margin_max": float(mmax), "margin_mean": float(mmean),
         })
 
+    # --- 對第 10 輪的模型跑逐攻擊類型 recall 分析 ---
     round10_model = os.path.join(model_dir, f"global_model_round_{NUM_ROUNDS}.ubj")
     recall_path = os.path.join(RESULTS_DIR, f"leaf_scale_{label}_recall.txt")
     if os.path.exists(round10_model):
@@ -159,6 +183,9 @@ def run_one(label, w, summary_rows):
 
 
 def main():
+    """依序對 SWEEP_VALUES 裡每組 (label, w) 呼叫 run_one()，全部跑完後
+    把彙整出的 summary_rows 寫成 results/leaf_scale_summary.csv。
+    """
     os.makedirs(RESULTS_DIR, exist_ok=True)
     summary_rows = []
     for label, w in SWEEP_VALUES:

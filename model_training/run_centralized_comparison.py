@@ -44,8 +44,19 @@ PARAMS = {
 
 
 def main():
+    """把 5 個節點的訓練資料集中起來訓練一個 100 棵樹的 XGBoost 模型，在
+    chunk_6.csv 上評估整體指標與逐攻擊類型表現，寫成
+    results/centralized_reseed_recall.txt，當作聯邦架構的診斷對照組。
+
+    怎麼做分成幾個階段：
+        # --- 讀取並合併 5 個節點的訓練資料 ---
+        # --- 用跟 client.py 相同的超參數訓練 ---
+        # --- 在 chunk_6.csv 上評估整體指標 ---
+        # --- 逐攻擊類型計算 recall／FPR 並寫檔 ---
+    """
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
+    # --- 讀取並合併 5 個節點的訓練資料 ---
     print("[Info] Loading and pooling chunk_1..5.csv...")
     dfs = []
     for i in range(1, NUM_CLIENTS + 1):
@@ -59,6 +70,7 @@ def main():
     y_train = df_train_p.iloc[:, -1]
     dtrain = xgb.DMatrix(X_train.values, label=y_train.values, feature_names=X_train.columns.tolist())
 
+    # --- 用跟 client.py 相同的超參數訓練 ---
     print(f"[Info] Training centralized model, num_boost_round={NUM_BOOST_ROUND}...")
     bst = xgb.train(PARAMS, dtrain, num_boost_round=NUM_BOOST_ROUND, verbose_eval=False)
 
@@ -66,6 +78,7 @@ def main():
     bst.save_model(model_path)
     print(f"[Info] Saved centralized model to {model_path}")
 
+    # --- 在 chunk_6.csv 上評估整體指標 ---
     val_path = os.path.join(SPLIT_DIR, "chunk_6.csv")
     df_val_raw = pd.read_csv(val_path)
     attack_labels = df_val_raw["attack"].copy()
@@ -86,6 +99,7 @@ def main():
 
     lines = [f"model={model_path}", f"n_trees={bst.num_boosted_rounds()}",
              f"overall accuracy={acc:.4f} precision={prec:.4f} recall={rec:.4f} f1={f1:.4f}", ""]
+    # --- 逐攻擊類型計算 recall／FPR 並寫檔 ---
     lines.append(f"{'attack_type':30s} {'n':>8s} {'value':>10s}  metric")
     print(f"{'attack_type':30s} {'n':>8s} {'value':>10s}  metric")
     for atype in attack_labels.unique():
