@@ -14,19 +14,19 @@
 在這個目錄（`fdo-integration/`）底下，用 Git Bash 執行：
 
 ```bash
-./scripts/01-gen-certs.sh                      # 只需跑一次
-MSYS_NO_PATHCONV=1 ./scripts/02-up-servers.sh  # 只需跑一次 —— 啟動三個 container，等 /health
-./scripts/03-configure-rvinfo.sh               # 只需跑一次 —— 設定 RVInfo + device-CA 信任 + RVTO2Addr
+./scripts/01-gen-certs.sh          # 只需跑一次
+./scripts/02-up-servers.sh         # 只需跑一次 —— 啟動三個 container，等 /health
+./scripts/03-configure-rvinfo.sh   # 只需跑一次 —— 設定 RVInfo + device-CA 信任 + RVTO2Addr
 
 # 針對機台 1~5，各跑一次：
-MSYS_NO_PATHCONV=1 ./scripts/04-onboard-machine.sh 1
-MSYS_NO_PATHCONV=1 ./scripts/04-onboard-machine.sh 2
-MSYS_NO_PATHCONV=1 ./scripts/04-onboard-machine.sh 3
-MSYS_NO_PATHCONV=1 ./scripts/04-onboard-machine.sh 4
-MSYS_NO_PATHCONV=1 ./scripts/04-onboard-machine.sh 5
+./scripts/04-onboard-machine.sh 1
+./scripts/04-onboard-machine.sh 2
+./scripts/04-onboard-machine.sh 3
+./scripts/04-onboard-machine.sh 4
+./scripts/04-onboard-machine.sh 5
 ```
 
-`MSYS_NO_PATHCONV=1`是為了讓 Git Bash 不要把傳給 `docker compose run` 的 `/workdir/...` 容器路徑誤轉成 Windows 路徑。如果某個指令加了這個還是怪怪的，改用 PowerShell 跑同一支 script 就好——底層呼叫的 `docker` CLI 指令是一樣的。
+每支 script 都會透過 `lib.sh` 自動設定 `MSYS_NO_PATHCONV=1`，不用自己在指令前面加——這是為了讓 Git Bash 不要把傳給 `docker run`/`docker compose run` 的容器內路徑（例如 `/certs/...`、`/workdir/...`）誤轉成 Windows 路徑。如果某個指令還是怪怪的，改用 PowerShell 跑同一支 script 就好——底層呼叫的 `docker` CLI 指令是一樣的。
 
 每次跑 `04-onboard-machine.sh` 都會在 `../demo_web/backend/guid_machine_map.json` 裡新增/更新一筆紀錄。針對同一台機台重複執行是安全的（模擬重新上線——該機台對應的 guid 會被換掉）。
 

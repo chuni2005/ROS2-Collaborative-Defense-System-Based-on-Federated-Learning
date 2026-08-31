@@ -11,6 +11,18 @@
 #   - use the V1 API (/api/v1/...), same as the tested harness, not V2
 set -euo pipefail
 
+# NOTE on Git Bash path conversion: MSYS rewrites bare Unix-style CLI
+# arguments (e.g. "/certs/foo") into Windows paths before they reach a native
+# binary like docker.exe. That's exactly what we want for *host* paths (e.g.
+# the compose --file path below, curl -o targets), but it's wrong for
+# arguments that name a path *inside a container* (e.g. "/certs" as the
+# right-hand side of a -v mount, or "/workdir/..." passed to go-fdo-client).
+# Disabling it globally breaks the host-path case instead (notably curl's
+# "-o /dev/null" — Windows curl.exe can't open a literal "/dev/null" once
+# MSYS stops translating it), so MSYS_NO_PATHCONV is set locally, only around
+# the specific docker invocations that need it (see run_client() below and
+# 01-gen-certs.sh), not exported for the whole script.
+
 FDO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." &>/dev/null && pwd)"
 INTEGRATION_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." &>/dev/null && pwd)"
 WORKDIR="${INTEGRATION_DIR}/workdir"
@@ -19,10 +31,30 @@ CREDS_DIR="${WORKDIR}/device-credentials"
 
 SERVER_COMPOSE="${FDO_ROOT}/FDO/go-fdo-server/deployments/compose/server/fdo-onboarding-servers.yaml"
 CLIENT_COMPOSE="${INTEGRATION_DIR}/docker-compose.client.yaml"
+# Our own override of FDO/go-fdo-client/Dockerfile (not a submodule file —
+# pins a working golang builder tag; see docker/go-fdo-client.Dockerfile for
+# why). docker-compose.client.yaml picks it up via ${client_dockerfile}.
+CLIENT_DOCKERFILE="${INTEGRATION_DIR}/docker/go-fdo-client.Dockerfile"
 
-MANUFACTURER_URL="http://localhost:8038"
-RENDEZVOUS_URL="http://localhost:8041"
-OWNER_URL="http://localhost:8043"
+# `docker compose --file <path>` shells out to a native Windows binary that
+# needs a real Windows path, not the MSYS "/c/Users/..." form these were just
+# built in. With MSYS_NO_PATHCONV=1 (above) disabling bash's usual automatic
+# conversion, we have to do it ourselves for the handful of paths that name a
+# file on the *host* rather than inside a container.
+if command -v cygpath &>/dev/null; then
+  SERVER_COMPOSE="$(cygpath -w "${SERVER_COMPOSE}")"
+  CLIENT_COMPOSE="$(cygpath -w "${CLIENT_COMPOSE}")"
+  CLIENT_DOCKERFILE="$(cygpath -w "${CLIENT_DOCKERFILE}")"
+fi
+export client_dockerfile="${CLIENT_DOCKERFILE}"
+
+# 127.0.0.1, not "localhost" — on this Windows/Docker Desktop/WSL2 setup,
+# resolving "localhost" sometimes prefers IPv6 (::1) and the connection stalls
+# for a long time before failing over to IPv4, which made wait_for_health
+# below flaky/slow even though the service was already up and healthy.
+MANUFACTURER_URL="http://127.0.0.1:8038"
+RENDEZVOUS_URL="http://127.0.0.1:8041"
+OWNER_URL="http://127.0.0.1:8043"
 
 GUID_MAP_FILE="${FDO_ROOT}/demo_web/backend/guid_machine_map.json"
 
@@ -33,7 +65,7 @@ log_err() { echo "[fdo][error] $*" >&2; }
 wait_for_health() {
   local url=$1 name=$2 retries=0 max_retries=30
   log_info "waiting for ${name} health at ${url}/health"
-  until curl -fsS -o /dev/null "${url}/health" 2>/dev/null; do
+  until curl -fsS --max-time 3 "${url}/health" >/dev/null 2>&1; do
     retries=$((retries + 1))
     if [ "${retries}" -ge "${max_retries}" ]; then
       log_err "${name} did not become healthy in time"
@@ -83,7 +115,10 @@ get_real_ip() {
 # --- go-fdo-client, run via Docker Compose (no local Go toolchain available) ---
 
 run_client() {
-  docker compose --file "${CLIENT_COMPOSE}" run --rm go-fdo-client "$@"
+  # go-fdo-client's own CLI args (--blob /workdir/...) are container-internal
+  # paths and must not be MSYS-translated; --file "${CLIENT_COMPOSE}" is a
+  # host path and was already resolved to native Windows form above.
+  MSYS_NO_PATHCONV=1 docker compose --file "${CLIENT_COMPOSE}" run --rm go-fdo-client "$@"
 }
 
 # --- voucher handoff (V1 API) ---

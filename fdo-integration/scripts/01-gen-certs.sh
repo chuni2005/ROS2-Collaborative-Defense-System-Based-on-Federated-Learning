@@ -28,9 +28,12 @@ mkdir -p "${CERTS_DIR}"
 gen_one() {
   local name=$1 subj=$2
   log_info "generating ${name} key+cert"
-  docker run --rm -u 65532:65532 -v "${CERTS_DIR}:/certs" alpine/openssl:latest \
+  # MSYS_NO_PATHCONV=1 scoped to just these two calls: "/certs/..." here names
+  # a path inside the container, not on the host, and must not be rewritten
+  # into a Windows path by Git Bash.
+  MSYS_NO_PATHCONV=1 docker run --rm -u 65532:65532 -v "${CERTS_DIR}:/certs" alpine/openssl:latest \
     ecparam -name prime256v1 -genkey -outform der -out "/certs/${name}.key"
-  docker run --rm -u 65532:65532 -v "${CERTS_DIR}:/certs" alpine/openssl:latest \
+  MSYS_NO_PATHCONV=1 docker run --rm -u 65532:65532 -v "${CERTS_DIR}:/certs" alpine/openssl:latest \
     req -x509 -key "/certs/${name}.key" -keyform der -subj "${subj}" -days 365 -out "/certs/${name}.crt"
 }
 

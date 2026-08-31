@@ -6,7 +6,9 @@ services:
     container_name: go-fdo-client
     hostname: go-fdo-client
     image: go-fdo-client
-    build: ../FDO/go-fdo-client
+    build:
+      context: ../FDO/go-fdo-client
+      dockerfile: ${client_dockerfile}
     working_dir: ${container_working_dir:-/workdir}/device-credentials
     user: "0:0"
     networks:
