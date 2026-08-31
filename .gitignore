@@ -5,4 +5,6 @@ model_training/tmp
 model_training/split-data
 model_training/img
 model_training/model
+model_training/val-data
+model_training/test-data
 output_models
