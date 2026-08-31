@@ -87,7 +87,7 @@ class Splitter:
             rng.shuffle(pool)
             take = max(1, math.ceil(len(pool) * ratio))
             test_records.extend(pool[:take])
-            print(f"[Splitter] Test split - {label}: {take}/{len(pool)} rows selected.")
+            print(f"[Splitter] Ratio split - {label}: {take}/{len(pool)} rows selected.")
 
         test_offsets = {record.offset for record in test_records}
 
@@ -129,10 +129,26 @@ class Splitter:
                 f"must be perfectly divisible by requested total split size ({total_needed_rows})."
             )
 
+    def default_distribute_chunk_size(self) -> None:
+        # Equal-size distribution shared by Random / Sequential / Dirichlet
+        total_needed = self.chunk.chunk_size * self.chunk.chunk_num
+        unit_size = self.chunk.chunk_size
+        remain = 0
+ 
+        if self.it.row_num < total_needed:
+            unit_size = self.it.row_num // self.chunk.chunk_num
+            remain = self.it.row_num % self.chunk.chunk_num
+ 
+        self.chunk.chunk_path = [(path, unit_size) for path, _ in self.chunk.chunk_path]
+ 
+        if remain and self.chunk.chunk_path:
+            last_path, last_size = self.chunk.chunk_path[-1]
+            self.chunk.chunk_path[-1] = (last_path, last_size + remain)    
+
     # Reporting
     def plot_attack_labels(self, csv_path: str, title: str) -> None:
         os.makedirs(self.chart.chart_dir, exist_ok=True)
-        df = pd.read_csv(csv_path)
+        df = pd.read_csv(csv_path, dtype=str)
 
         if "attack" not in df.columns:
             raise ValueError("[Error] Cannot find attack column")

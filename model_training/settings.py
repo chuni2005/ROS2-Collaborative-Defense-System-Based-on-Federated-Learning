@@ -1,13 +1,14 @@
 import math
 import os
+import socket
 import sys
 import subprocess
 import time
 import shutil
 
-from split import Chunk, RandomStrategy, Splitter, StratifiedStrategy
+from split import Chunk, RandomStrategy, Splitter, StratifiedStrategy, SequentialStrategy
 
-NUM_CLIENTS = 5
+NUM_CLIENTS = 7
 NUM_ROUNDS = 10
 
 TARGET_DATA = "../ROSPaCe_complete/ROSPaCe_complete_noperiodicity.csv"
@@ -18,15 +19,17 @@ TEST_RATIO = 0.1  #  ratio of every attack class
 
 VAL_DIR = "val-data"
 VALIDATION_DATA = f"{VAL_DIR}/val.csv"
-VAL_RATIO = 0.05
+VAL_RATIO = 0.005
 
 SPLIT_DIR = "split-data"
-CLIENT_STRATEGY = StratifiedStrategy
-SPLIT_UNIT = 3732  # 1200000
+CLIENT_STRATEGY = SequentialStrategy
+SPLIT_UNIT = 120000  # per chunks  # ss=1000
 RANDOM_SEED = None
 
 LOG_DIR = "logs"
 MODEL_DIR = "model"
+
+SERVER_ADDRESS = "127.0.0.1:8080"
 
 
 class SysLogger(object):
@@ -54,6 +57,7 @@ class MainRunner(object):
         self.server_proc = None
         self.client_procs = []
         self.round_times = []
+        self.turn = 1
         self._init()
 
         self.splitter = Splitter(
@@ -61,7 +65,7 @@ class MainRunner(object):
             tmp_dir=os.path.join(self.base_dir, "tmp"),
             output_dir=os.path.join(self.base_dir, SPLIT_DIR),
             chart_dir=os.path.join(self.base_dir, "img"),
-            chunk_size=SPLIT_UNIT // NUM_CLIENTS,
+            chunk_size=SPLIT_UNIT,
             chunk_num=NUM_CLIENTS,
             strategy=CLIENT_STRATEGY(),
         )
@@ -72,8 +76,9 @@ class MainRunner(object):
             output_path=os.path.join(self.base_dir, TEST_DATA),
             random_seed=RANDOM_SEED,
         )
+        self.splitter.plot_attack_labels(TEST_DATA, f"Test Distributed")
 
-        rounds = self.splitter.it.row_num / SPLIT_UNIT
+        rounds = self.splitter.it.row_num / (SPLIT_UNIT * NUM_CLIENTS)
         self.total_rounds = max(1, math.ceil(rounds))
 
     def __del__(self):
@@ -95,6 +100,9 @@ class MainRunner(object):
             random_seed=RANDOM_SEED,
         )
         print(f"[Runner] Splitting Chunk Data (clients)... [2/4]")
+        self.splitter.plot_attack_labels(
+            VALIDATION_DATA, f"Vaidation Distributed {self.turn} Turn"
+        )
         self._split_round_client_data()
 
     def _split_round_client_data(self):
@@ -102,10 +110,17 @@ class MainRunner(object):
         self.splitter.chunk = Chunk(
             chunk_data_dir=split_dir,
             chunk_num=NUM_CLIENTS,
-            chunk_size=SPLIT_UNIT // NUM_CLIENTS,
+            chunk_size=SPLIT_UNIT,
         )
+
         self.splitter.set_strategy(CLIENT_STRATEGY())
         self.splitter.split_to_chunks()
+        # img
+        for i in range(NUM_CLIENTS):
+            chunk_csv_path = os.path.join(split_dir, f"chunk_{i}.csv")
+            self.splitter.plot_attack_labels(
+                chunk_csv_path, f"Chunk {i} in {self.turn} Turn"
+            )
 
     def run_server(self):
         print("[Runner] Running Flower Server... [3/4]")
@@ -120,17 +135,34 @@ class MainRunner(object):
                     f"--num_clients={NUM_CLIENTS}",
                     f"--num_rounds={NUM_ROUNDS}",
                     f"--validation_data_path={VALIDATION_DATA}",
+                    f"--server_address={SERVER_ADDRESS}",
                 ],
                 stdout=server_log,
                 stderr=server_log,
                 cwd=self.base_dir,
             )
-        time.sleep(3)
+        server_address = SERVER_ADDRESS.split(":")
+        self._wait_for_server_ready(server_address[0], int(server_address[1]))
+
+    def _wait_for_server_ready(self, host, port, timeout=120):
+        start = time.time()
+        while time.time() - start < timeout:
+            if self.server_proc.poll() is not None:
+                raise RuntimeError(
+                    "[Runner] Server process died before becoming ready."
+                )
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(1)
+                if s.connect_ex((host, port)) == 0:
+                    print("[Runner] Server is ready.")
+                    return
+            time.sleep(0.5)
+        raise TimeoutError("[Runner] Server did not become ready in time.")
 
     def run_clients(self):
         self.client_procs = []
         for i in range(NUM_CLIENTS):
-            print(f"[Runner] Running Clients [4/4: {i}/{NUM_CLIENTS}]")
+            print(f"[Runner] Running Clients [4/4: {i+1}/{NUM_CLIENTS}]")
             with open(
                 os.path.join(self.log_dir, f"client_{i}.log"), "a", encoding="utf-8"
             ) as client_log:
@@ -150,7 +182,7 @@ class MainRunner(object):
     def life_check(self):
         if self.server_proc is None:
             print(
-                "\n[Info] Bruh cannot find the server process. Please ensure the server is running."
+                "\n[Runner] Bruh cannot find the server process. Please ensure the server is running."
             )
             sys.exit(1)
 
@@ -160,10 +192,9 @@ class MainRunner(object):
             if self.server_proc.poll() is not None:
                 elapsed_seconds = time.time() - start_time
                 self.round_times.append(elapsed_seconds)
-                # split_data() already ran before this round's server/clients,
-                # so it.row_num already reflects what's left for future rounds.
+
                 remaining_rounds = max(
-                    0, math.ceil(self.splitter.it.row_num / SPLIT_UNIT)
+                    0, math.ceil(self.splitter.it.row_num / (SPLIT_UNIT * NUM_CLIENTS))
                 )
                 avg_round_time = (
                     sum(self.round_times) / len(self.round_times)
@@ -172,14 +203,14 @@ class MainRunner(object):
                 )
                 estimated_time = avg_round_time * remaining_rounds
                 print(
-                    f"\n[Info] Round finished in {self._format_duration(elapsed_seconds)}; estimated remaining: {self._format_duration(estimated_time)}"
+                    f"\n[Runner] Round finished in {self._format_duration(elapsed_seconds)}; estimated remaining: {self._format_duration(estimated_time)}"
                 )
-                print("[Info] This turn is over.")
+                print("[Runner] This turn is over.")
                 break
 
             elapsed_seconds = time.time() - start_time
             print(
-                f"\r[Info] [{self._format_duration(elapsed_seconds)}] FL doing... ",
+                f"\r[Runner] [{self._format_duration(elapsed_seconds)}] FL doing... ",
                 end="",
                 flush=True,
             )

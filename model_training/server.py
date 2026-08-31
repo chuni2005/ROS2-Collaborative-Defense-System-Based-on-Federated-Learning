@@ -82,7 +82,7 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
         self.dval = None
         if val_data_path and os.path.exists(val_data_path):
             print(f"[Info] Loading server-side validation data from {val_data_path}...")
-            df_val = pd.read_csv(val_data_path)
+            df_val = pd.read_csv(val_data_path, low_memory=False)
             df_val = preprocess_data(df_val)
             X_val = df_val.iloc[:, :-1]
             y_val = df_val.iloc[:, -1]
