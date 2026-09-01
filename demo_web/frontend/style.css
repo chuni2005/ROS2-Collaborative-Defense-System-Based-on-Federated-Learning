@@ -307,10 +307,34 @@ button:hover {
   font-weight: 700;
   color: var(--accent-strong);
 }
+.score-chart-wrap {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+.score-axis {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 2px 0;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
 .score-chart {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   height: 80px;
   display: block;
+  background: var(--bg-accent);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.score-chart .threshold-line {
+  stroke: var(--warning);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+  vector-effect: non-scaling-stroke;
 }
 .score-chart polyline {
   fill: none;
