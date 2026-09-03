@@ -1,0 +1,5 @@
+cell,model_path,test_natural_accuracy,test_natural_precision,test_natural_recall,test_natural_f1
+no_attack_no_defense,D:\FL ROS2\our-project-err-lfr\model_training\model_attack_no_attack\global_model_round_10.ubj,0.966255,0.9982166963883935,0.9482675363947974,0.972601238201563
+attack_no_defense,D:\FL ROS2\our-project-err-lfr\model_training\model_attack_attack_c1_full\global_model_round_10.ubj,0.953605,0.9797907750832144,0.9460589124704132,0.9626294316886632
+no_attack_err_lfr,D:\FL ROS2\our-project-err-lfr\model_training\model_err_lfr_no_attack_err_lfr\global_model_round_10.ubj,0.966425,0.9982836193967672,0.9484733579791487,0.9727412591386806
+attack_err_lfr,D:\FL ROS2\our-project-err-lfr\model_training\model_err_lfr_attack_err_lfr\global_model_round_10.ubj,0.96542,0.9983639262431239,0.9468030366599907,0.9719001145773234

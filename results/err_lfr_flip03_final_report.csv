@@ -1,0 +1,2 @@
+cell,model_path,test_natural_accuracy,test_natural_precision,test_natural_recall,test_natural_f1
+attack_flip0.3_err_lfr,D:\FL ROS2\our-project-err-lfr\model_training\model_err_lfr_attack_flip0.3_err_lfr\global_model_round_10.ubj,0.96572,0.998697601415941,0.9469613609556454,0.9721416323313098

@@ -1,0 +1,14 @@
+model=D:\FL ROS2\our-project-err-lfr\model_training\outputs\models\centralized_reseed.ubj
+# 這份檔案的逐攻擊類型 recall/FPR 算在 test_rare.csv 上；
+# 整體 accuracy/precision/recall/f1 是算在 test_natural.csv 上，
+# 兩者不是同一份資料，不能直接放在同一列比。
+test_natural overall: accuracy=0.8477 precision=0.8192 recall=0.9737 f1=0.8898
+
+attack_type                           n      value  metric
+observe                           70561     0.3753  FPR
+nmap SYN flood                   104003     0.9969  recall
+metasploit SYN flood               5122     0.9647  recall
+ros2 node crashing                 5194     0.0146  recall
+nmap discovery                     6505     0.6792  recall
+ros2 reconnaissance                5226     0.8928  recall
+ros2 reflection                    3389     0.7209  recall

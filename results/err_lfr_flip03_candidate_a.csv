@@ -1,0 +1,11 @@
+config,round,accuracy,logloss
+attack_flip0.3_err_lfr,1,0.9594,0.1356
+attack_flip0.3_err_lfr,2,0.9631,0.1026
+attack_flip0.3_err_lfr,3,0.9631,0.0957
+attack_flip0.3_err_lfr,4,0.5359,6.9882
+attack_flip0.3_err_lfr,5,0.9582,0.1625
+attack_flip0.3_err_lfr,6,0.4306,8.6771
+attack_flip0.3_err_lfr,7,0.8376,2.1262
+attack_flip0.3_err_lfr,8,0.9152,0.7
+attack_flip0.3_err_lfr,9,0.9449,0.3552
+attack_flip0.3_err_lfr,10,0.9109,0.9518
