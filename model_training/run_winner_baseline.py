@@ -1,25 +1,9 @@
-"""跑一次完整的 10 輪贏者全拿 baseline，重新產生 baseline 數字。
+"""跑一次完整的 10 輪贏者全拿（winner-take-all）baseline，重新產生 baseline 數字。
 
-原理：這不是獨立的聚合機制，是把既有的 server.py（--aggregation=winner）
-跟 client.py 組合起來，跑一次完整流程再把結果整理成檔案——跟
-run_leaf_scale_sweep.py 是同一套執行框架，差別只在這裡只跑一組設定
-（贏者全拿），不是掃描多個係數。
-
-輸入：磁碟上既有的 split_data/chunk_1..6.csv。
-輸出：伺服器 log 解析出來的逐輪 accuracy/F1（印在終端機），以及第 10 輪
-模型的逐攻擊類型 recall（results/baseline_reseed_recall.txt）。
-
-怎麼做：啟動 server.py（--aggregation=winner）跟 5 個 client.py 子行程，
-跑滿 10 輪；伺服器行程結束後，從它的 log 解析出每一輪贏家的
-accuracy/F1 印出來；再對第 10 輪存下來的模型呼叫
-analyze_recall_by_attack.py 算逐攻擊類型 recall。
-
-為什麼需要它：split_data 用固定種子重新產生過一次（SPLIT_SEED=42）之後，
-舊切分上的 baseline 數字沒辦法用同一份資料重現，這支腳本在新切分上補跑
-一次，讓原本的 baseline 頭條數字有對應的新資料版本可以對照。
-
-完整調查過程見 notes/12-baseline.md、notes/12b-branch-delta.md。
+本檔案唯一需要修改的實驗設定在區塊 1。
 """
+# ==================== 區塊 1：實驗設定 ====================
+# 這支腳本只跑單一組設定，會影響輸出的參數都是這裡的模組層級常數。
 import os
 import re
 import shutil
@@ -34,12 +18,16 @@ NUM_ROUNDS = 10
 SERVER_ADDRESS = "127.0.0.1:8080"
 VAL_DATA_PATH = os.path.join(BASE_DIR, "split_data", "chunk_6.csv")
 
+# ==================== 區塊 2：log 解析規則 ====================
+# 綁死 server.py 在贏者全拿模式下印出來的 log 文字格式，用來抓每輪贏家的 accuracy/f1。
 ROUND_RE = re.compile(
     r"\[Info\] Round (\d+) kept the highest-F1 model \(client \S+, "
     r"client_id=(\S+), accuracy=([\d.]+), f1=([\d.]+)\)"
 )
 
 
+# ==================== 區塊 3：子行程收尾工具 ====================
+# 訓練跑完（或逾時）之後，用來把 server/client 子行程都關掉的共用函式。
 def stop_process(proc):
     """終止子行程，先 terminate，5 秒沒關掉就 kill。"""
     if proc is None or proc.poll() is not None:
@@ -58,25 +46,20 @@ def main():
     類型 recall 分析。
 
     輸入：無參數，設定寫死在檔案開頭常數。
-    輸出：無回傳值。副作用包括：寫 log 到 logs/baseline_reseed/、把訓練
-    出的模型存到 model_baseline_reseed/、把逐攻擊類型 recall 寫到
-    results/baseline_reseed_recall.txt，並把逐輪結果印到終端機。
-
-    怎麼做分成幾個階段：
-        # --- 啟動 server（winner 模式） ---
-        # --- 啟動全部 5 個 client（winner 模式） ---
-        # --- 等 server 結束或逾時、收拾所有子行程 ---
-        # --- 解析 server log 取得每輪贏家的 accuracy/f1 ---
-        # --- 對第 10 輪的模型跑逐攻擊類型 recall 分析 ---
+    輸出：無回傳值。副作用包括：寫 log 到 outputs/logs/baseline_reseed/、把訓練
+    出的模型存到 outputs/models/baseline_reseed/、把逐攻擊類型 recall 寫到
+    results/baseline_reseed_recall.txt，並把逐輪結果印到終端機。各階段見下方
+    區塊 4-8 註解。
     """
     os.makedirs(RESULTS_DIR, exist_ok=True)
-    model_dir = os.path.join(BASE_DIR, "model_baseline_reseed")
-    log_dir = os.path.join(BASE_DIR, "logs", "baseline_reseed")
+    model_dir = os.path.join(BASE_DIR, "outputs", "models", "baseline_reseed")
+    log_dir = os.path.join(BASE_DIR, "outputs", "logs", "baseline_reseed")
     os.makedirs(log_dir, exist_ok=True)
     if os.path.isdir(model_dir):
         shutil.rmtree(model_dir)
     os.makedirs(model_dir, exist_ok=True)
 
+    # ==================== 區塊 4：啟動 server ====================
     # --- 啟動 server（winner 模式） ---
     server_log_path = os.path.join(log_dir, "server.log")
     server_log = open(server_log_path, "w", encoding="utf-8")
@@ -94,6 +77,7 @@ def main():
     )
     time.sleep(3)
 
+    # ==================== 區塊 5：啟動 client ====================
     # --- 啟動全部 5 個 client（winner 模式） ---
     client_procs = []
     client_logs = []
@@ -113,6 +97,7 @@ def main():
         )
         client_procs.append(proc)
 
+    # ==================== 區塊 6：等待與收拾 ====================
     # --- 等 server 結束或逾時、收拾所有子行程 ---
     start = time.time()
     timeout_s = 300
@@ -131,6 +116,7 @@ def main():
     for cl in client_logs:
         cl.close()
 
+    # ==================== 區塊 7：解析 log ====================
     # --- 解析 server log 取得每輪贏家的 accuracy/f1 ---
     with open(server_log_path, "r", encoding="utf-8") as f:
         server_text = f.read()
@@ -138,6 +124,7 @@ def main():
         rnd, cid, acc, f1 = m.groups()
         print(f"round {rnd}: client_id={cid} accuracy={acc} f1={f1}")
 
+    # ==================== 區塊 8：後續分析／寫出結果 ====================
     # --- 對第 10 輪的模型跑逐攻擊類型 recall 分析 ---
     round10_model = os.path.join(model_dir, f"global_model_round_{NUM_ROUNDS}.ubj")
     if os.path.exists(round10_model):

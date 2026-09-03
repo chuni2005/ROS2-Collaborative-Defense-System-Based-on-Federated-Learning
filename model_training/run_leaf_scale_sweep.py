@@ -1,32 +1,10 @@
-"""掃描 leaf_scale 這個縮放係數，測哪個值能讓 bagging 合併穩定收斂。
+"""掃描 leaf_scale ∈ {1/5, 1/3, 1/2, 1} 四個候選值，各跑一次完整的 10 輪
+bagging 訓練，找出哪個值能讓合併穩定收斂、不會讓預測值爆掉。
 
-原理：bagging 合併時，5 個節點每輪各自獨立對同一個全域模型修正，伺服器
-直接把 5 份修正加總（不是取平均），等於把學習率放大了將近 5 倍，逐輪
-疊加下去會讓預測值爆掉。leaf_scale 是拿來抵銷這個放大效果的縮放係數，
-掃描不同值就是為了找出哪個值最好（機制細節見 server.py 的
-scale_leaf_values()）。
-
-輸入：磁碟上既有的 split_data/chunk_1..6.csv（不重新切分，理由見下）；
-掃描 leaf_scale ∈ {1/5, 1/3, 1/2, 1} 四個候選值。
-輸出：results/leaf_scale_summary.csv（四組 × 10 輪的逐輪
-accuracy/F1/margin），以及每組第 10 輪模型的逐攻擊類型 recall
-（results/leaf_scale_<label>_recall.txt）。
-
-怎麼做：對每個候選值，各自跑一次完整的 10 輪聯邦 bagging 訓練，各自用一個
-全新的 model_dir（不然 initialize_parameters() 會接著前一個候選值留下的
-模型繼續訓練）跟自己的 log 目錄（logs/leaf_scale_<label>/）。逐輪的
-accuracy/F1/margin 是從伺服器自己的 stdout 解析出來的（「[Info] Round N
-bagging-merged ...」這幾行 log），四組跑完後彙整成一份 csv；另外對每組
-第 10 輪的模型呼叫 analyze_recall_by_attack.py 算逐攻擊類型 recall。
-
-為什麼刻意不重新切分：split_data/chunk_*.csv 已經是前一次執行留下來的，
-而且 split.py 的切分沒有固定隨機種子——如果在掃描不同 leaf_scale 值之間
-重新切分，會把「leaf_scale 造成的效果」跟「換了一份資料切分造成的效果」
-混在一起，分不清楚是哪個原因，所以四個候選值全部沿用磁碟上既有的同一份
-資料訓練與評估。
-
-完整調查過程見 notes/13a-bagging-baseline.md、notes/12-baseline.md。
+本檔案唯一需要修改的實驗設定在區塊 1。
 """
+# ==================== 區塊 1：實驗設定 ====================
+# 要改掃描哪些 leaf_scale 候選值，改 SWEEP_VALUES；其餘是共用路徑與訓練固定參數。
 import csv
 import os
 import re
@@ -49,6 +27,8 @@ SWEEP_VALUES = [
     ("1-1", 1.0),
 ]
 
+# ==================== 區塊 2：log 解析規則 ====================
+# 綁死 server.py 在 bagging 模式下印出來的 log 文字格式，用來抓每輪的 accuracy/f1/margin。
 ROUND_RE = re.compile(
     r"\[Info\] Round (\d+) bagging-merged \d+ client models "
     r"\(accuracy=([\d.]+), f1=([\d.]+), margin=\[(-?[\d.]+), (-?[\d.]+)\], "
@@ -56,6 +36,8 @@ ROUND_RE = re.compile(
 )
 
 
+# ==================== 區塊 3：子行程收尾工具 ====================
+# 每組候選值跑完（或逾時）之後，用來把 server/client 子行程都關掉的共用函式。
 def stop_process(proc):
     """終止子行程，先 terminate，5 秒沒關掉就 kill。"""
     if proc is None or proc.poll() is not None:
@@ -76,20 +58,13 @@ def run_one(label, w, summary_rows):
     傳給 server.py --leaf_scale 的縮放係數；summary_rows 是呼叫端傳進來
     的 list，這個函式會直接把這組設定的逐輪結果 append 進去（就地修改，
     沒有回傳值）。
-    輸出：無回傳值。副作用包括：寫 log 到 logs/leaf_scale_<label>/、把
-    訓練出的模型存到 model_leaf_scale_<label>/、把逐攻擊類型 recall 寫到
-    results/leaf_scale_<label>_recall.txt。
-
-    怎麼做分成幾個階段：
-        # --- 啟動 server（帶這組的 --leaf_scale） ---
-        # --- 啟動全部 5 個 client ---
-        # --- 等 server 結束或逾時、收拾所有子行程 ---
-        # --- 解析 server log 取得逐輪 accuracy/f1/margin ---
-        # --- 對第 10 輪的模型跑逐攻擊類型 recall 分析 ---
+    輸出：無回傳值。副作用包括：寫 log 到 outputs/logs/leaf_scale_<label>/、把
+    訓練出的模型存到 outputs/models/leaf_scale_<label>/、把逐攻擊類型 recall 寫到
+    results/leaf_scale_<label>_recall.txt。各階段見下方區塊 4-8 註解。
     """
     print(f"\n===== leaf_scale={w:.6f} (label={label}) =====", flush=True)
-    model_dir = os.path.join(BASE_DIR, f"model_leaf_scale_{label}")
-    log_dir = os.path.join(BASE_DIR, "logs", f"leaf_scale_{label}")
+    model_dir = os.path.join(BASE_DIR, "outputs", "models", f"leaf_scale_{label}")
+    log_dir = os.path.join(BASE_DIR, "outputs", "logs", f"leaf_scale_{label}")
     os.makedirs(log_dir, exist_ok=True)
     # 每個掃描值都用全新的 model_dir——不然 initialize_parameters() 會接著
     # 前一個掃描值留下的 global_model_latest.ubj 繼續訓練，不是從頭開始
@@ -98,6 +73,7 @@ def run_one(label, w, summary_rows):
         shutil.rmtree(model_dir)
     os.makedirs(model_dir, exist_ok=True)
 
+    # ==================== 區塊 4：啟動 server ====================
     # --- 啟動 server（帶這組的 --leaf_scale） ---
     server_log_path = os.path.join(log_dir, "server.log")
     server_log = open(server_log_path, "w", encoding="utf-8")
@@ -116,6 +92,7 @@ def run_one(label, w, summary_rows):
     )
     time.sleep(3)
 
+    # ==================== 區塊 5：啟動 client ====================
     # --- 啟動全部 5 個 client ---
     client_procs = []
     client_logs = []
@@ -135,6 +112,7 @@ def run_one(label, w, summary_rows):
         )
         client_procs.append(proc)
 
+    # ==================== 區塊 6：等待與收拾 ====================
     # --- 等 server 結束或逾時、收拾所有子行程 ---
     start = time.time()
     timeout_s = 300
@@ -153,6 +131,7 @@ def run_one(label, w, summary_rows):
     for cl in client_logs:
         cl.close()
 
+    # ==================== 區塊 7：解析 log ====================
     # --- 解析 server log 取得逐輪 accuracy/f1/margin ---
     with open(server_log_path, "r", encoding="utf-8") as f:
         server_text = f.read()
@@ -164,6 +143,7 @@ def run_one(label, w, summary_rows):
             "margin_min": float(mmin), "margin_max": float(mmax), "margin_mean": float(mmean),
         })
 
+    # ==================== 區塊 8：後續分析 ====================
     # --- 對第 10 輪的模型跑逐攻擊類型 recall 分析 ---
     round10_model = os.path.join(model_dir, f"global_model_round_{NUM_ROUNDS}.ubj")
     recall_path = os.path.join(RESULTS_DIR, f"leaf_scale_{label}_recall.txt")
@@ -182,6 +162,8 @@ def run_one(label, w, summary_rows):
         print(f"[Warning] round-10 model not found at {round10_model}, skipping recall analysis.")
 
 
+# ==================== 區塊 9：主流程／寫出結果 ====================
+# 依序對 SWEEP_VALUES 每組呼叫 run_one()，全部跑完後把彙整出的結果寫成一份 csv。
 def main():
     """依序對 SWEEP_VALUES 裡每組 (label, w) 呼叫 run_one()，全部跑完後
     把彙整出的 summary_rows 寫成 results/leaf_scale_summary.csv。

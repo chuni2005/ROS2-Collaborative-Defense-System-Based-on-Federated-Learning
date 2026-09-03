@@ -1,15 +1,12 @@
 __pycache__
 ROSPaCe_complete
-ROSPaCe_reduced*
 *.tar.gz
-logs
-tmp
-split_data
 model
-model_baseline*
-model_bagging*
-model_leaf_scale*
-model_loo_*
-model_centralized_reseed.ubj
-output_models
-results
+model_training/outputs/
+model_training/tmp/
+model_training/split_data/
+model_training/ROSPaCe_reduced/
+
+# run_err_lfr_flip03.py 的執行副產物，沒有被任何筆記或 analysis.ipynb 引用
+results/err_lfr_flip03_participation.csv
+results/err_lfr_flip03_summary.csv

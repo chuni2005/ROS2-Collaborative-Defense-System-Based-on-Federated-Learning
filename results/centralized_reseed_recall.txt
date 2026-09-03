@@ -1,0 +1,12 @@
+model=D:\FL ROS2\our-project-err-lfr\model_training\model_centralized_reseed.ubj
+n_trees=100
+overall accuracy=0.8515 precision=0.8230 recall=0.9743 f1=0.8923
+
+attack_type                           n      value  metric
+nmap SYN flood                   108511     0.9969  recall
+observe                           73749     0.3587  FPR
+ros2 reconnaissance                5462     0.9037  recall
+nmap discovery                     6757     0.6922  recall
+metasploit SYN flood               5405     0.9606  recall
+ros2 node crashing                   69     0.0145  recall
+ros2 reflection                      47     0.5319  recall
