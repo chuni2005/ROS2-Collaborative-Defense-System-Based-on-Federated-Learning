@@ -6,11 +6,6 @@ import sys
 
 
 def detect(args):
-    """檢查執行切分前的必要條件，任一項不成立就印出錯誤訊息並
-    sys.exit(1)：來源檔案 args.target_data 必須存在；args.split_dir 不存在
-    就自動建立；args.unit 與 args.chunk 都必須是正整數，且 unit 必須能被
-    chunk 整除。
-    """
     if not os.path.exists(args.target_data):
         print("[Error] Source data not found.")
         sys.exit(1)
@@ -24,10 +19,6 @@ def detect(args):
 
 
 def copy_data(data_path):
-    """把來源資料複製一份到 tmp/data.csv，之後的切分都對這份複本操作，
-    不動原始檔案。如果 tmp/data.csv 已經存在（例如上次執行中斷留下的），
-    直接沿用、不重新複製，並回傳這個複本的路徑。
-    """
     tmp_file_path = os.path.join("tmp", "data.csv")
 
     if os.path.exists(tmp_file_path):
@@ -44,28 +35,6 @@ def copy_data(data_path):
 
 
 def split_csv_ordered(tmp_file_path, args):
-    """依照檔案原本的行序，從 tmp_file_path 開頭切出 args.unit 筆資料，
-    平均分配進 args.chunk 個 chunk_N.csv，其餘資料寫回 tmp_file_path 供
-    下一次呼叫繼續切。
-
-    輸入：tmp_file_path — copy_data() 產生的複本路徑；args.unit 是這次要
-    切出的筆數上限，args.chunk 是要分成幾個節點檔案，args.split_dir 是
-    輸出目錄。
-    輸出：無回傳值。副作用是在 args.split_dir 底下寫出 chunk_1.csv ~
-    chunk_{args.chunk}.csv（各自帶表頭），並視情況覆寫或刪除
-    tmp_file_path。
-
-    怎麼做：逐行讀取檔案（不是整個載進記憶體），先讀出表頭，接著最多讀
-    args.unit 行存進 lines；把這批行數平均分配給每個 chunk（除不盡時前
-    extra 個 chunk 各多分一行）；分配完之後，把檔案剩下的內容（可能一行
-    都沒有）串流寫進 remain_file_path；最後如果還有剩餘資料，用
-    remain_file_path 取代 tmp_file_path（下次呼叫從這裡繼續切）；如果沒有
-    剩餘，直接刪掉兩個檔案，代表來源資料已經切完。
-
-    為什麼要串流處理：main.py 的 MainRunner 是設計來處理比記憶體大的來源
-    檔案（一次只切 SPLIT_UNIT 行出來），如果這裡改成整個檔案讀進記憶體，
-    就違背了這支腳本存在的目的。
-    """
     print(f"[Info] Splitting source data into {args.unit} rows per file...")
 
     remain_file_path = tmp_file_path + ".remain"
@@ -150,31 +119,6 @@ import os
 import random
 
 def split_csv_random(tmp_file_path, args):
-    """跟 split_csv_ordered() 做同一件事（切出 args.unit 筆、分成
-    args.chunk 份、其餘寫回 tmp_file_path），差別是用水塘抽樣（reservoir
-    sampling）從整個檔案裡隨機取樣 args.unit 筆，而不是取檔案最前面的
-    args.unit 行。
-
-    原理（水塘抽樣）：維護一個大小固定為 args.unit 的樣本池
-    sampled_rows。前 args.unit 筆資料直接放進池子；之後每讀到第 i 筆
-    （i 從 args.unit 起算），以 args.unit/(i+1) 的機率（用
-    random.randint(0, i) < args.unit 實作）跟池子裡隨機一筆互換，被換出來
-    的那筆連同所有沒被選中的資料一起寫進 remain_file_path。這個做法能在
-    只掃過一次檔案、不知道總筆數的情況下，保證每一筆資料被選進樣本池的
-    機率相等。
-
-    輸出檔案在寫入前先 random.shuffle(sampled_rows)，避免抽樣機制本身在
-    池子裡留下的順序偏差被誤認成資料原本的順序。
-
-    跟 split_csv_ordered() 的收尾邏輯不同：這裡用
-    `os.path.getsize(remain_file_path) > 10`（而不是「有沒有資料」）判斷
-    是否還有剩餘可處理，因為 remain_file_path 就算沒有資料列，也會因為
-    表頭那一行永遠大於 0 bytes——用 10 這個閾值是為了跟「只剩表頭」的
-    情況區分開來，不是嚴謹的資料量門檻。
-
-    呼叫端要記得 args.seed 會影響這個函式的隨機性——main() 裡在呼叫這個
-    函式之前呼叫 random.seed(args.seed)。
-    """
     print(f"[Info] Safely sampling {args.unit} rows randomly using Python native CSV engine...")
 
     remain_file_path = tmp_file_path + ".remain"
@@ -252,11 +196,6 @@ def split_csv_random(tmp_file_path, args):
 
 
 def main():
-    """指令列進入點：解析參數、呼叫 detect() 驗證前置條件，複製來源資料
-    後依 --random 旗標決定呼叫 split_csv_random() 或 split_csv_ordered()。
-    --random 搭配 --seed 時才會呼叫 random.seed()，讓隨機切分可重現；
-    未加 --seed 則保留原本的非決定性行為。
-    """
     parser = argparse.ArgumentParser(description="Split a CSV file into multiple smaller CSV files based on the specified number of rows per file.")
     parser.add_argument("--target_data", type=str, help="Path to the input CSV file.")
     parser.add_argument("--split_dir", type=str, help="Directory where the split CSV files will be saved.")
