@@ -28,9 +28,28 @@ TENSOR_TYPE = "xgboost-ubj"
 NUM_BOOST_ROUND = 10  # 每個聯邦輪次新增的樹數；bagging 模式下也用這個數字
                       # 切出「這一輪新增的樹」。
 
-# precision/recall/F1 的正類是 1（「攻擊」）——必須跟 server.py 的
-# POSITIVE_CLASS 一致。見 notes/11-dataset-check.md。
+# precision/recall/F1 的正類是 1（「攻擊」）——必須跟 server.py 的 POSITIVE_CLASS 一致
 POSITIVE_CLASS = 1
+
+# 標籤翻轉攻擊選要翻轉哪些列用的隨機種子基準。跟 train_test_split 的
+# random_state=client_id 分開算，避免「選哪些列翻轉」跟「怎麼切
+# 訓練/驗證/測試」共用同一組隨機數狀態、彼此影響。
+ATTACK_SEED_BASE = 10000
+
+
+def flip_labels(label, client_id, rate):
+    """標籤翻轉攻擊：把 label 中 rate 比例的樣本標籤反轉（0 和 1 互換），
+    回傳新 Series，不修改原始物件。用 ATTACK_SEED_BASE + client_id 當種子
+    抽出 round(len(label) * rate) 個位置做 1 - 原值，固定種子確保同一
+    client_id、同一 rate 每次重跑選到的列都相同。
+    """
+    label = label.copy()
+    rng = np.random.RandomState(ATTACK_SEED_BASE + client_id)
+    n = len(label)
+    n_flip = int(round(n * rate))
+    flip_pos = rng.choice(n, size=n_flip, replace=False)
+    label.iloc[flip_pos] = 1 - label.iloc[flip_pos]
+    return label
 
 
 def convert_type(x):
@@ -82,24 +101,18 @@ def preprocess_data(df):
     return df.astype(np.float32)
 
 
-def load_local_data(client_id, data_path, eval_data_path=None):
-    """讀取一個節點自己的本地資料，切成訓練／驗證／本地測試三份 DMatrix。
+def load_local_data(client_id, data_path, eval_data_path=None, malicious=False, label_flip_rate=1.0):
+    """讀取一個節點的本地 CSV，依 client_id 當隨機種子切成訓練:驗證:測試
+    = 60:20:20 三份 DMatrix。malicious=True 時，在切分之前就對整份本地
+    標籤呼叫 flip_labels()——因此三份切分的標籤都是翻轉後的結果，這個
+    節點「本來就是」一份有問題的資料，不是只在送出模型的那一刻造假。
+    eval_data_path 目前未使用，是保留給未來外部評估集的參數，永遠回傳
+    None。標籤只有單一類別或筆數太少時（can_stratify 系列檢查）自動退化
+    成不分層抽樣，避免 train_test_split 直接拋例外。
 
-    輸入：client_id 用來當 train_test_split 的隨機種子（讓每個節點的切分
-    可重現、節點之間彼此不同）；data_path 是這個節點自己的訓練資料 CSV
-    （split_data/chunk_N.csv）；eval_data_path 目前沒有使用（永遠回傳
-    None，是保留給未來外部評估集用的參數）。
-    輸出：一個 9 元組 (dtrain, dval, dtest_local, deval_external,
-    y_eval_external, 訓練筆數, 本地測試筆數, 本地測試真實標籤)；
-    deval_external／y_eval_external 目前固定是 None。
-
-    怎麼做：先用 preprocess_data() 清理資料，切出 features／label；用兩次
-    train_test_split 依 80/20 再 75/25 的比例切成 訓練:驗證:測試 =
-    60:20:20；can_stratify／can_stratify_2 檢查該次切分的標籤是否至少
-    兩類、每類至少兩筆，只有滿足才用 stratify 分層抽樣，避免資料筆數太少
-    或只剩單一類別時 train_test_split 直接拋例外；最後印出各切分的標籤
-    分布，以及 train/test 之間依特徵值判斷的重複筆數，供人工檢查資料切分
-    是否合理。
+    回傳 9 元組 (dtrain, dval, dtest_local, deval_external, y_eval_external,
+    訓練筆數, 本地測試筆數, 本地測試真實標籤)；deval_external/
+    y_eval_external 固定是 None。
     """
     print(f"\n[Info] [Client {client_id}] Loading local training data: {data_path}")
 
@@ -109,6 +122,14 @@ def load_local_data(client_id, data_path, eval_data_path=None):
     label = df_train_cleaned['attack']
     features = df_train_cleaned.drop(['attack'], axis=1)
     train_feature_names = features.columns.tolist()
+
+    if malicious and label_flip_rate > 0:
+        pre_flip_counts = label.value_counts()
+        label = flip_labels(label, client_id, label_flip_rate)
+        print(
+            f"[Attack] [Client {client_id}] Label-flipping attack ACTIVE "
+            f"(rate={label_flip_rate}). Before:\n{pre_flip_counts}\nAfter:\n{label.value_counts()}"
+        )
 
     print(f"[Diagnostic] [Client {client_id}] Overall label distribution:\n{label.value_counts()}")
 
@@ -156,18 +177,20 @@ class XGBoostClient(fl.client.Client):
     序列化模型給伺服器、以及在自己的本地測試集上評估。
     """
 
-    def __init__(self, client_id, data_path, eval_data_path=None, aggregation="winner"):
-        """載入這個節點的本地資料（三份切分都在 load_local_data() 裡完成），
-        並固定 XGBoost 的訓練超參數（objective=binary:logistic、eta=0.1、
-        max_depth=5、tree_method=hist）。aggregation 參數決定 fit() 最後要
-        送整個模型還是只送新樹（見 _parameters_from_new_trees()）。
+    def __init__(self, client_id, data_path, eval_data_path=None, aggregation="winner",
+                 malicious=False, label_flip_rate=1.0):
+        """載入本地資料（load_local_data()）、固定訓練超參數
+        （objective=binary:logistic、eta=0.1、max_depth=5、tree_method=hist）。
+        aggregation 決定 fit() 送整個模型還是只送新樹（見 _parameters_from_new_trees()）。
         """
         self.client_id = client_id
         self.aggregation = aggregation
+        self.malicious = malicious
+        self.label_flip_rate = label_flip_rate
 
         self.dtrain, self.dval, self.dtest_local, self.deval_ext, self.y_ext, \
             self.num_train, self.num_test, self.y_test_local = \
-            load_local_data(client_id, data_path, eval_data_path)
+            load_local_data(client_id, data_path, eval_data_path, malicious, label_flip_rate)
 
         self.bst = None
         self.current_round = 0
@@ -178,12 +201,9 @@ class XGBoostClient(fl.client.Client):
         }
 
     def _load_model_from_bytes(self, model_bytes):
-        """把伺服器傳來的模型 bytes 還原成一個 XGBoost Booster。
-
-        XGBoost 的 Booster.load_model() 只接受檔案路徑，沒有直接從記憶體
-        bytes 讀取的 API，所以這裡先寫進一個暫存檔、讀回來、再刪掉暫存檔。
-        model_bytes 是空值時直接回傳 None；載入過程拋例外時記錄失敗次數並
-        回傳 None，不會讓呼叫端崩潰。
+        """把伺服器傳來的模型 bytes 還原成 XGBoost Booster。Booster.load_model()
+        只接受檔案路徑、沒有從記憶體 bytes 讀取的 API，所以先寫暫存檔再讀回、
+        刪除。model_bytes 為空或載入失敗都回傳 None（失敗會記錄次數），不拋例外。
         """
         if not model_bytes:
             return None
@@ -211,11 +231,9 @@ class XGBoostClient(fl.client.Client):
                 os.remove(tmp_file)
 
     def _serialize_model_to_bytes(self):
-        """把 self.bst 存成 bytes，供 Parameters 物件裝載傳給伺服器。
-
-        跟 _load_model_from_bytes() 對稱：XGBoost 的 save_model() 只能存到
-        檔案，沒有直接輸出 bytes 的 API，所以一樣先存暫存檔、讀回 bytes、
-        再刪掉暫存檔。self.bst 是 None 時回傳空 bytes b""。
+        """把 self.bst 存成 bytes 供 Parameters 裝載。跟 _load_model_from_bytes()
+        對稱：save_model() 只能存檔案，所以先存暫存檔再讀回、刪除。self.bst
+        為 None 時回傳 b""。
         """
         if self.bst is None:
             return b""
@@ -233,14 +251,12 @@ class XGBoostClient(fl.client.Client):
                 os.remove(tmp_file)
 
     def _save_model_artifact(self):
-        """印出這個節點目前模型最重要的 15 個特徵（依 gain 排序），並把
-        模型存成 output_models/client_{id}_round_{round}.ubj 留底。
+        """印出目前模型依 gain 排序前 15 個特徵，並存成
+        output_models/client_{id}_round_{round}.ubj。
 
-        下面雖然有一段 `if self.bst is None: return None`，但那段檢查寫在
-        `self.bst.get_score(...)` 之後——self.bst 真的是 None 時會先在
-        get_score() 那行拋 AttributeError，不會走到這個檢查。目前唯一呼叫點
-        在 fit() 訓練完之後，self.bst 不會是 None，所以這個順序問題還沒有
-        實際發生過。
+        注意：下面的 `if self.bst is None` 檢查寫在 `get_score()` 之後，
+        self.bst 真的是 None 時會先在 get_score() 拋 AttributeError，檢查
+        永遠不會生效——目前唯一呼叫點在 fit() 訓練完之後，尚未實際觸發過。
         """
         importance = self.bst.get_score(importance_type='gain')
         sorted_importance = sorted(importance.items(), key=lambda x: x[1], reverse=True)
@@ -279,34 +295,18 @@ class XGBoostClient(fl.client.Client):
         return Parameters(tensors=tensors, tensor_type=TENSOR_TYPE)
 
     def _parameters_from_new_trees(self) -> Parameters:
-        """只把這個節點這一輪新練的樹切出來、包成 Parameters，不是整個模型。
+        """只把這個節點這一輪新練的樹切出來包成 Parameters，不是整個模型。
 
-        原理：XGBoost 的 Booster 支援切片語法 booster[a:b]，取出「第 a 到 b
-        次訓練疊代對應的樹」組成一個新的、獨立的 Booster。每次呼叫
-        xgb.train(..., num_boost_round=N, xgb_model=舊模型) 都會在舊模型
-        後面剛好新增 N 個疊代（這個專案的設定下，一次疊代就是一棵樹）。所以
-        「總疊代數 − 這次新增的疊代數」到「總疊代數」這一段切片，剛好就是
-        這一輪新練出來的那些樹，不多也不少。
+        XGBoost 的 Booster 支援切片 booster[a:b]，取出第 a 到 b 個訓練
+        疊代組成新的 Booster；每次 xgb.train(..., num_boost_round=N,
+        xgb_model=舊模型) 都會在舊模型後面剛好新增 N 個疊代（本專案設定下
+        一個疊代就是一棵樹）。所以用 self.bst[total_rounds-NUM_BOOST_ROUND
+        : total_rounds] 切出來的，剛好就是這一輪新練出的樹，不多不少；序列化
+        時一樣先存暫存檔再讀回 bytes（XGBoost 沒有記憶體序列化 API）。
 
-        輸入：self.bst — 這個節點目前的完整模型（上一輪收到的全域模型 +
-              這一輪剛練好的 NUM_BOOST_ROUND 棵新樹）
-        輸出：Parameters 物件，裡面只裝這一輪新增的 NUM_BOOST_ROUND 棵樹，
-              序列化成 UBJ bytes（不是 self.bst 整個模型）
-
-        怎麼做：total_rounds = self.bst.num_boosted_rounds() 拿到目前總共
-        練了幾個疊代；用切片 self.bst[total_rounds-NUM_BOOST_ROUND :
-        total_rounds] 取出最後 NUM_BOOST_ROUND 個疊代，變成一個新的
-        Booster；因為 XGBoost 沒有直接序列化到記憶體 bytes 的 API，這裡先
-        存成暫存檔、讀回 bytes、再刪掉暫存檔。
-
-        為什麼需要它：只在 bagging 模式使用。如果每輪都送整個累積的模型，
-        伺服器合併時沒辦法知道「這次新增的是哪幾棵」，只能用不可靠的欄位去
-        猜（這正是直接套用 Flower 官方 aggregate() 會出問題的原因，見
-        aggregate_bagging_verified() 的 docstring）。只送這一輪新練的樹，
-        伺服器直接數收到幾棵就知道要接幾棵，不需要猜、也不用相信節點自己
-        宣稱新增了幾棵。
-
-        完整調查過程見 notes/00-findings.md、notes/13a-bagging-baseline.md。
+        只在 bagging 模式使用：如果每輪都送整個累積模型，伺服器沒辦法知道
+        這次新增的是哪幾棵，只能猜或相信節點自報；只送新樹，伺服器直接數
+        收到幾棵就知道要接幾棵。
         """
         if self.bst is None:
             return Parameters(tensors=[], tensor_type=TENSOR_TYPE)
@@ -348,19 +348,14 @@ class XGBoostClient(fl.client.Client):
         except Exception as e:
             print(f"[Warning] Global model evaluation failed: {e}")
 
-    # zero_division=0：某個 client 的本地測試切分（自己那份 chunk 的 20%）
-    # 剛好只有單一標籤時，precision/recall/F1 會回傳 0.0，不會拋出例外或
-    # 警告——這個邊界情況目前還沒有在真實資料上被觸發過，所以這個預設值
-    # 沒有拿我們實際的 chunk 大小驗證過。
+    # zero_division=0：本地測試切分若剛好只剩單一標籤，precision/recall/F1
+    # 回傳 0.0 而不拋例外——這個邊界情況目前未在實際資料上驗證過。
     def _evaluate_local_test(self):
-        """計算 self.bst 在本地測試集上的 logloss、accuracy、precision、
-        recall、F1，回傳成 dict。
-
-        logloss 是手動用二元交叉熵公式算的（XGBoost 的 eval_metric 只在
-        訓練時的 evals 列表裡起作用，這裡是訓練後單獨對測試集算，所以自己
-        實作一次）；preds_prob_clipped 把機率夾在 [1e-7, 1-1e-7] 之間，
-        避免 log(0) 造成 inf。self.bst 是 None 或計算過程拋例外時，回傳
-        全部指標為 0（logloss 為 1.0）的預設 dict，不會讓呼叫端崩潰。
+        """算 self.bst 在本地測試集上的 logloss/accuracy/precision/recall/f1，
+        回傳 dict。logloss 手動算交叉熵（XGBoost 的 eval_metric 只在訓練時
+        的 evals 列表起作用，訓練後另外對測試集算要自己實作），機率夾在
+        [1e-7, 1-1e-7] 避免 log(0)。失敗或 self.bst 為 None 回傳全 0
+        （logloss=1.0）的預設 dict，不拋例外。
         """
         print("[Info-Test] Client local model - local test")
         if self.bst is None:
@@ -406,15 +401,9 @@ class XGBoostClient(fl.client.Client):
         )
 
     def fit(self, ins: FitIns) -> FitRes:
-        """Flower 每輪呼叫一次：載入伺服器送來的全域模型、在本地資料上續練
-        NUM_BOOST_ROUND 棵新樹、把結果（依 aggregation 模式決定送整個模型
-        或只送新樹）回傳給伺服器。
-
-        輸入：ins.parameters 是伺服器目前的全域模型。
-        輸出：FitRes，包含要送給伺服器的模型/樹片段，以及這個節點在本地
-        測試集上算出的 accuracy/precision/recall/f1/logloss 等 metrics
-        （client_id 只是方便伺服器 log 對照用，見 server.py 的
-        reported_client_id 說明）。
+        """Flower 每輪呼叫一次：載入全域模型、續練 NUM_BOOST_ROUND 棵新樹、
+        依 aggregation 模式回傳整個模型或只回傳新樹（metrics 裡的
+        accuracy/precision/recall/f1/logloss 是本地測試集算出來的）。
         """
         # --- 還原全域模型、評估更新前的表現 ---
         self.current_round += 1
@@ -448,13 +437,12 @@ class XGBoostClient(fl.client.Client):
             parameters=fit_parameters,
             num_examples=self.num_train,
             metrics={
-                # 純觀察用途——讓伺服器的 log 能把 Flower 內部的 cid 對應到
-                # 我們自己的 1-5 編號。從不用於評分或信任判斷（server.py 的
-                # aggregate_fit() 只依自己算出來的 f1 排序），所以說謊的
-                # client 沒辦法像被移除的那個 accuracy 自報 fallback 一樣
-                # 利用這個欄位——完整理由見 server.py 裡 reported_client_id
-                # 那段註解。
+                # 純觀察用途，方便伺服器 log 對照——client 自報，伺服器不
+                # 驗證真偽，也不用於任何評分或篩選判斷（server.py 的
+                # aggregate_fit() 只依自己算出來的 f1 排序）。
                 "client_id": self.client_id,
+                # 同上，純觀察用途，client 自報不驗證。
+                "malicious": self.malicious,
                 "accuracy": local_metrics["accuracy"],
                 "precision": local_metrics["precision"],
                 "recall": local_metrics["recall"],
@@ -465,14 +453,13 @@ class XGBoostClient(fl.client.Client):
         )
 
     def evaluate(self, ins: EvaluateIns) -> EvaluateRes:
-        """Flower 的 EvaluateIns/Res 介面方法：把伺服器傳來的模型跑一次
-        本地測試集評估，回傳 loss（logloss）與 accuracy/precision/recall/f1。
-        self.bst 還原失敗（None）時回傳 loss=1.0、num_examples=0、指標全 0，
-        不會拋例外。
+        """Flower 的 EvaluateIns/Res 介面方法：跑一次本地測試集評估，回傳
+        loss（logloss）與 accuracy/precision/recall/f1。self.bst 還原失敗時
+        回傳 loss=1.0、指標全 0，不拋例外。
 
-        在這個專案裡目前沒有被實際呼叫——server.py 的
-        fraction_evaluate=0.0、min_evaluate_clients=0（見
-        XGBoostStrategy.__init__()），Flower 不會對任何節點呼叫這個方法。
+        目前沒有被實際呼叫：server.py 的 fraction_evaluate=0.0、
+        min_evaluate_clients=0（XGBoostStrategy.__init__()），Flower 不會
+        對任何節點呼叫這個方法。
         """
         self._set_booster_from_parameters(ins.parameters)
 
@@ -507,10 +494,19 @@ if __name__ == "__main__":
     parser.add_argument("--aggregation", type=str, default="winner", choices=["winner", "bagging"],
                         help="Must match the server's --aggregation. winner = send the whole cumulative "
                              "model each round (default). bagging = send only this round's new trees.")
+    parser.add_argument("--malicious", action="store_true",
+                        help="Turn this client into a label-flipping attacker (see flip_labels()). "
+                             "Off by default; the honest majority never pass this flag.")
+    parser.add_argument("--label_flip_rate", type=float, default=1.0,
+                        help="Only used when --malicious is set. Fraction of this client's local "
+                             "labels to flip (1.0 = flip all, the default full-strength attack).")
     args = parser.parse_args()
 
     print(f"Flower Client {args.client_id} running ...")
     fl.client.start_client(
         server_address=args.server_address,
-        client=XGBoostClient(args.client_id, args.data_path, aggregation=args.aggregation)
+        client=XGBoostClient(
+            args.client_id, args.data_path, aggregation=args.aggregation,
+            malicious=args.malicious, label_flip_rate=args.label_flip_rate,
+        )
     )

@@ -11,6 +11,11 @@ NUM_CLIENTS = 5
 NUM_ROUNDS = 10
 TARGET_DATA = "ROSPaCe_reduced/ROSPaCe_reduced_merged.csv"
 VALIDATION_DATA = f"split_data/chunk_{NUM_CLIENTS+1}.csv"
+# 只給訓練結束後的最終報告用：test_natural 報整體 F1，test_rare 報逐攻擊
+# 類型 recall。訓練期間的模型選擇與 ERR/LFR 決策一律只能讀 VALIDATION_DATA，
+# 不得讀取這兩份。
+TEST_DATA_NATURAL = "split_data/test_natural.csv"
+TEST_DATA_RARE = "split_data/test_rare.csv"
 
 SPLIT_UNIT = 1200000
 SPLIT_DIR = "split_data"

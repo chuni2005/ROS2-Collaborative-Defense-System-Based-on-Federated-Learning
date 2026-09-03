@@ -1,0 +1,12 @@
+model=D:\FL ROS2\our-project-err-lfr\model_training\model_attack_no_attack\global_model_round_10.ubj
+n_trees=59
+margin_min=-13.0009 margin_max=14.4164 margin_mean=4.6690
+
+attack_type                           n      value  metric
+nmap SYN flood                   108511     0.9998  recall
+observe                           73749     0.0038  FPR
+ros2 reconnaissance                5462     0.0370  recall
+nmap discovery                     6757     0.8194  recall
+metasploit SYN flood               5405     0.9993  recall
+ros2 node crashing                   69     0.0870  recall
+ros2 reflection                      47     0.0000  recall
