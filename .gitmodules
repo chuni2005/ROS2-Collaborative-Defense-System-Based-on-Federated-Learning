@@ -1,0 +1,9 @@
+[submodule "FDO/go-fdo"]
+	path = FDO/go-fdo
+	url = git@github.com:fido-device-onboard/go-fdo.git
+[submodule "FDO/go-fdo-client"]
+	path = FDO/go-fdo-client
+	url = git@github.com:fido-device-onboard/go-fdo-client.git
+[submodule "FDO/go-fdo-server"]
+	path = FDO/go-fdo-server
+	url = git@github.com:fido-device-onboard/go-fdo-server.git

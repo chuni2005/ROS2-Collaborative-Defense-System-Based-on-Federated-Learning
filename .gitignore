@@ -6,6 +6,10 @@ model_training/outputs/
 model_training/tmp/
 model_training/split_data/
 model_training/ROSPaCe_reduced/
+dataset/*
+!.gitkeep
+fdo-integration/workdir/
+demo_web/backend/guid_machine_map.json
 
 # run_err_lfr_flip03.py 的執行副產物，沒有被任何筆記或 analysis.ipynb 引用
 results/err_lfr_flip03_participation.csv
