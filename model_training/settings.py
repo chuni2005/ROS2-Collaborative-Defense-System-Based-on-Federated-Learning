@@ -22,8 +22,8 @@ VALIDATION_DATA = f"{VAL_DIR}/val.csv"
 VAL_RATIO = 0.005
 
 SPLIT_DIR = "split-data"
-CLIENT_STRATEGY = SequentialStrategy
-SPLIT_UNIT = 120000  # per chunks  # ss=1000
+CLIENT_STRATEGY = StratifiedStrategy
+SPLIT_UNIT = 1000  # per chunks  # ss=1000
 RANDOM_SEED = None
 
 LOG_DIR = "logs"
