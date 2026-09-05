@@ -6,7 +6,7 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 source ./lib.sh
 
 log_info "stopping FDO server containers"
-docker compose --file "${SERVER_COMPOSE}" down
+MSYS_NO_PATHCONV=1 docker compose --file "${SERVER_COMPOSE}" down
 
 if [ "${1:-}" = "--purge" ]; then
   log_info "purging ${WORKDIR}"

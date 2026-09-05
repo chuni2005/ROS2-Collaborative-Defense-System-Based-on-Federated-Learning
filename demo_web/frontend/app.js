@@ -140,9 +140,13 @@ const DiagnosisPanel = {
         </div>
         <div class="score-block">
           <p class="section-title">信任分數（近 10 秒趨勢）</p>
-          <svg class="score-chart" viewBox="0 0 100 100" preserveAspectRatio="none">
-            <polyline :points="chartPoints" />
-          </svg>
+          <div class="score-chart-wrap">
+            <div class="score-axis"><span>100</span><span>50</span><span>0</span></div>
+            <svg class="score-chart" viewBox="0 0 100 100" preserveAspectRatio="none">
+              <line class="threshold-line" x1="0" y1="50" x2="100" y2="50" />
+              <polyline :points="chartPoints" />
+            </svg>
+          </div>
           <p>{{ diagnosis.score !== null ? diagnosis.score.toFixed(1) : '尚無資料' }}</p>
         </div>
       </template>
