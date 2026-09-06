@@ -11,7 +11,9 @@ def main():
             runner.run_server()
             runner.run_clients()
             runner.life_check()
-            print("[Info] If u wanna close them, press Ctrl+C, but I wish u don't do that ouob .\n")
+            print(
+                "[Info] If u wanna close them, press Ctrl+C, but I wish u don't do that ouob .\n"
+            )
 
         except KeyboardInterrupt:
             print("\n[Info] I have been interrupt oao .")
@@ -24,8 +26,6 @@ def main():
         finally:
             print("[Info] closing all process...")
             runner.shut_down()
-
-        runner.next()
 
 
 if __name__ == "__main__":
