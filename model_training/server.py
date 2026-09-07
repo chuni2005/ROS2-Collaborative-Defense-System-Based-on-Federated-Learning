@@ -142,7 +142,7 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
             df_val = preprocess_data(df_val)
             X_val = df_val.iloc[:, :-1]
             y_val = df_val.iloc[:, -1]
-            self.dval = xgb.DMatrix(X_val, label=y_val)
+            self.dval = xgb.QuantileDMatrix(X_val, label=y_val)
             self.y_true = y_val.values
         else:
             raise FileNotFoundError(
@@ -377,6 +377,7 @@ class XGBoostBaggingStrategy(XGBoostStrategy):
         aggregated_parameters = Parameters(
             tensors=[merged_ubj], tensor_type="xgboost-ubj"
         )
+
         return aggregated_parameters, {
             "accuracy": merged_metrics["accuracy"],
             "precision": merged_metrics["precision"],
