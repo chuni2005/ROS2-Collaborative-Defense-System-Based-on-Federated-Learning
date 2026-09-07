@@ -7,4 +7,8 @@ model_training/img
 model_training/model
 model_training/val-data
 model_training/test-data
-output_models
+model_training/output_models
+dataset/*
+!.gitkeep
+fdo-integration/workdir/
+demo_web/backend/guid_machine_map.json
