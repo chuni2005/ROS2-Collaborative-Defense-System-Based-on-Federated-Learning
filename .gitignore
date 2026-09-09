@@ -12,3 +12,6 @@ dataset/*
 !.gitkeep
 fdo-integration/workdir/
 demo_web/backend/guid_machine_map.json
+Dynamic_Trust_Evaluation/*.ubj
+Dynamic_Trust_Evaluation/test.csv
+Dynamic_Trust_Evaluation/evaluation.log

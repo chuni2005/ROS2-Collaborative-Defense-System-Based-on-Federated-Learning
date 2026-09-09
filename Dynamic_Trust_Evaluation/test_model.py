@@ -249,8 +249,8 @@ if __name__ == "__main__":
     log_path = base_dir / "evaluation.log"
     sys.stdout = Logger(filename=str(log_path))
     
-    model_path = base_dir / "global_model_latest_0908.ubj"
-    test_csv_path = base_dir / "test-001.csv"
+    model_path = base_dir / "global_model_latest.ubj"
+    test_csv_path = base_dir / "test.csv"
     
     if not test_csv_path.exists():
         print(f"❌ 找不到測試資料，請確認 {test_csv_path} 是否存在！")
