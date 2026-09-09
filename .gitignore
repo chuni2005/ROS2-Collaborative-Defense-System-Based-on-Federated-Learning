@@ -8,10 +8,8 @@ model_training/model
 model_training/val-data
 model_training/test-data
 model_training/output_models
-dataset/*
+base/*
 !.gitkeep
 fdo-integration/workdir/
 demo_web/backend/guid_machine_map.json
-Dynamic_Trust_Evaluation/*.ubj
-Dynamic_Trust_Evaluation/test.csv
 Dynamic_Trust_Evaluation/evaluation.log

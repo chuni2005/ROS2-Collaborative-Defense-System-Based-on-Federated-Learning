@@ -245,13 +245,14 @@ def evaluate_model(model_path: str | Path, test_data) -> None:
 
 if __name__ == "__main__":
     base_dir = Path(__file__).resolve().parent
-    
+    data_dir = base_dir.parent / "base"
+
     log_path = base_dir / "evaluation.log"
     sys.stdout = Logger(filename=str(log_path))
-    
-    model_path = base_dir / "global_model_latest.ubj"
-    test_csv_path = base_dir / "test.csv"
-    
+
+    model_path = data_dir / "global_model_latest.ubj"
+    test_csv_path = data_dir / "test.csv"
+
     if not test_csv_path.exists():
         print(f"❌ 找不到測試資料，請確認 {test_csv_path} 是否存在！")
         sys.exit(1)

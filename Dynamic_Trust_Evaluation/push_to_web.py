@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_model as tm
 
 BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR.parent / "base"
 DEFAULT_BACKEND_URL = "http://localhost:5181"
 DEFAULT_GUID_MAP_PATH = BASE_DIR.parent / "demo_web" / "backend" / "guid_machine_map.json"
 
@@ -61,8 +62,8 @@ def push_row(backend_url: str, guid: str, score: float, threshold: float, passed
 def main():
     parser = argparse.ArgumentParser(description="把模型算出的信任分數即時推送到 demo_web 後端")
     parser.add_argument("--machine", type=int, required=True, help="機台編號 (1~5)，必須先用 04-onboard-machine.sh 上線")
-    parser.add_argument("--model", default="global_model_latest.ubj", help="相對於本檔案所在資料夾的模型路徑")
-    parser.add_argument("--test-data", default="test.csv", help="相對於本檔案所在資料夾的測試資料路徑")
+    parser.add_argument("--model", default="global_model_latest.ubj", help="模型檔名/路徑，相對於 base/ 資料夾")
+    parser.add_argument("--test-data", default="test.csv", help="測試資料檔名/路徑，相對於 base/ 資料夾")
     parser.add_argument("--count", type=int, default=20, help="要推送幾筆資料 (預設 20)")
     parser.add_argument("--interval", type=float, default=1.0, help="每筆之間間隔秒數 (預設 1 秒，跟網頁的節奏對得上)")
     parser.add_argument("--backend-url", default=DEFAULT_BACKEND_URL)
@@ -74,12 +75,12 @@ def main():
     print(f"[push_to_web] 機台 {args.machine} 的 GUID: {guid}")
 
     booster = xgb.Booster()
-    booster.load_model(str(BASE_DIR / args.model))
+    booster.load_model(str(DATA_DIR / args.model))
     expected_cols = booster.feature_names
 
     engine = tm.FuzzyDynamicTrustEngine(str(BASE_DIR / "fuzzy_threshold_config.json"))
 
-    df = pd.read_csv(BASE_DIR / args.test_data, nrows=args.count, low_memory=False)
+    df = pd.read_csv(DATA_DIR / args.test_data, nrows=args.count, low_memory=False)
     original_labels = df["attack"].values if "attack" in df.columns else ["Unknown"] * len(df)
 
     proc = tm.preprocess_data(df)

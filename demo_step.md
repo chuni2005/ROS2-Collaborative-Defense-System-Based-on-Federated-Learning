@@ -220,7 +220,7 @@ Press CTRL+C to quit
 
 前面都是環境建置，這一步才是這份文件的重點:讓 `Dynamic_Trust_Evaluation` 裡訓練好的 XGBoost 模型自己算分數、自己判斷通過或不通過，直接推進網頁，不用手動輸入任何數字。
 
-**先準備好兩個檔案**，放到 `Dynamic_Trust_Evaluation/` 資料夾底下，**檔名要完全一樣**：
+**先準備好兩個檔案**，放到專案最上層的 `base/` 資料夾底下，**檔名要完全一樣**：
 
 - `global_model_latest.ubj`(訓練好的模型；跑完 `model_training/main.py` 之後會在 `model_training/model/` 底下)
 - `test.csv`(要拿來測試的資料；跑完 `model_training/main.py` 之後會在 `model_training/test-data/` 底下，也可以自己準備一份格式一樣的)
