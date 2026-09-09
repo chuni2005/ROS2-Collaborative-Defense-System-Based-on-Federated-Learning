@@ -42,10 +42,14 @@ python ../demo_web/backend/app.py
 ## Demo 流量（排練用）
 
 ```bash
-./scripts/simulate-ingest.sh 1 95   # 已上線機台、分數正常 -> 200 ok
-./scripts/simulate-ingest.sh 1 20   # 連續丟 4 秒以上 -> 觸發截斷/drop 窗口
+./scripts/simulate-ingest.sh 1 95            # 已上線機台、分數正常 -> 200 ok（門檻後端內部模擬）
+./scripts/simulate-ingest.sh 1 20            # 連續丟 4 秒以上 -> 觸發截斷/drop 窗口
+./scripts/simulate-ingest.sh 1 90 50 true   # 直接傳門檻+是否通過（模擬真評估器）
+./scripts/simulate-ingest.sh 1 50 90 false   # 直接傳門檻+是否通過（模擬真評估器）
 curl -X POST http://localhost:5181/api/ingest -d '{"score":95}'  # 沒帶/錯誤的 GUID -> 403
 ```
+
+`simulate-ingest.sh` 的完整用法：`simulate-ingest.sh <machine_id> <score> [threshold] [passed(true|false)]`。`threshold`/`passed` 是選填的——不帶的話，demo_web 後端會自己模擬一個門檻；帶了就直接採用，`passed` 也是（有傳就直接信任這個判斷，不會再拿 `score` 跟 `threshold` 重新比較一次）。細節看 `../demo_web/README.md`。
 
 ## 給負責寫真正機台模擬器的人
 

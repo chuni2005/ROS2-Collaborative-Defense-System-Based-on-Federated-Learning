@@ -5,13 +5,14 @@ from datetime import datetime, timezone
 
 from flask import Flask, jsonify, request
 
+import dynamic_trust
 import fdo_client
 
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend")
 
 MACHINE_COUNT = 5
 
-SCORE_THRESHOLD = 50          # 信任分數低於此值視為異常
+DEFAULT_SCORE_THRESHOLD = 50  # 還沒收到任何資料、動態門檻還沒算出來之前的預設值
 ABNORMAL_SUSTAIN_SECONDS = 4  # 異常持續幾秒才觸發截斷（3~5 秒）
 BLOCK_DURATION_SECONDS = 7    # 觸發後截斷幾秒（5~10 秒）
 BLOCK_HISTORY_LIMIT = 20
@@ -21,11 +22,15 @@ machines = {
     i: {
         "id": i,
         "name": f"機台{i}",
-        "score": None,          # 最新一次收到的信任分數
-        "last_update": None,    # 最近一次成功處理資料的時間 (epoch seconds)
-        "abnormal_since": None, # 分數持續低於門檻的起始時間
-        "blocked_until": None,  # 目前截斷狀態會維持到什麼時候
-        "block_history": [],    # 觸發截斷的紀錄
+        "score": None,             # 最新一次收到的信任分數
+        "threshold": None,         # 最新一次的信任分數門檻（外部評估器提供，或後端內部模擬算出）
+        "threshold_source": None,  # "external"（呼叫端直接傳 threshold）或 "internal"（後端自己模擬算的）
+        "env_risk": None,          # threshold_source 是 internal 時，算出門檻用的環境風險係數（-1~1）
+        "abnormal": False,         # 目前是否視為異常（有傳 passed 就直接用，沒傳才用 score < threshold 自己比較）
+        "last_update": None,       # 最近一次成功處理資料的時間 (epoch seconds)
+        "abnormal_since": None,    # 分數持續低於門檻的起始時間
+        "blocked_until": None,     # 目前截斷狀態會維持到什麼時候
+        "block_history": [],       # 觸發截斷的紀錄
     }
     for i in range(1, MACHINE_COUNT + 1)
 }
@@ -45,12 +50,16 @@ def is_blocked(m, now):
     return m["blocked_until"] is not None and now < m["blocked_until"]
 
 
+def current_threshold(m):
+    return m["threshold"] if m["threshold"] is not None else DEFAULT_SCORE_THRESHOLD
+
+
 def compute_light(m, now):
     if is_blocked(m, now):
         return "red"
     if m["score"] is None:
         return "gray"
-    if m["score"] < SCORE_THRESHOLD:
+    if m["abnormal"]:
         return "yellow"
     return "green"
 
@@ -60,7 +69,7 @@ def status_text(m, now):
         return "已截斷"
     if m["score"] is None:
         return "尚無資料"
-    if m["score"] < SCORE_THRESHOLD:
+    if m["abnormal"]:
         return "異常"
     return "正常"
 
@@ -131,10 +140,30 @@ def ingest():
             score = compute_diagnosis(machine_id, row)
         score = float(score)
 
+        # threshold 可以由呼叫端（真正的評估器：XGBoost 信任分數 + Fuzzy 動態門檻）直接算好傳進來。
+        # 呼叫端沒傳 threshold（例如舊版 simulate-ingest.sh 只丟 score）才落到內部模擬。
+        external_threshold = row.get("threshold")
+        if external_threshold is not None:
+            threshold = float(external_threshold)
+            risk = None
+            threshold_source = "external"
+        else:
+            threshold, risk = dynamic_trust.compute_dynamic_threshold()
+            threshold_source = "internal"
+
+        # 「是否通過」呼叫端有傳就直接採用（評估器自己判斷過了，不用我們重算一次）；
+        # 沒傳才用 score < threshold 自己比較。
+        external_passed = row.get("passed")
+        abnormal = (not bool(external_passed)) if external_passed is not None else (score < threshold)
+
         m["score"] = score
+        m["threshold"] = threshold
+        m["threshold_source"] = threshold_source
+        m["env_risk"] = risk
+        m["abnormal"] = abnormal
         m["last_update"] = now
 
-        if score < SCORE_THRESHOLD:
+        if abnormal:
             if m["abnormal_since"] is None:
                 m["abnormal_since"] = now
             elif now - m["abnormal_since"] >= ABNORMAL_SUSTAIN_SECONDS:
@@ -157,12 +186,18 @@ def diagnosis(machine_id):
             return jsonify({"error": "not found"}), 404
 
         blocked = is_blocked(m, now)
+        threshold = current_threshold(m)
         details = []
         if m["last_update"] is None:
             details.append("尚未收到資料")
         else:
             details.append(f"最後更新: {datetime.fromtimestamp(m['last_update']).strftime('%H:%M:%S')}")
-        details.append(f"信任分數門檻: {SCORE_THRESHOLD}")
+        if m["threshold_source"] == "external":
+            details.append(f"信任分數門檻: {threshold:.1f}（由評估器提供）")
+        elif m["threshold_source"] == "internal":
+            details.append(f"信任分數門檻: {threshold:.1f}（動態模擬，環境風險係數 {m['env_risk']:.2f}）")
+        else:
+            details.append(f"信任分數門檻: {threshold:.0f}（預設值，尚未收到資料）")
         if blocked:
             details.append(f"已截斷，剩餘 {m['blocked_until'] - now:.1f} 秒")
         elif m["abnormal_since"] is not None:
@@ -176,6 +211,7 @@ def diagnosis(machine_id):
                 "status": status_text(m, now),
                 "details": details,
                 "score": m["score"],
+                "threshold": threshold,
                 "blocked": blocked,
                 "blockedSecondsRemaining": max(0.0, m["blocked_until"] - now) if blocked else 0.0,
             }

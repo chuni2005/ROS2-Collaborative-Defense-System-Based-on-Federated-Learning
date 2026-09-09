@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
 # Reference simulator for demo rehearsal: POST one score reading to the
 # Flask backend as a given machine, using that machine's onboarded FDO GUID.
-# Usage: simulate-ingest.sh <machine_id> <score> [backend_url]
+#
+# threshold/passed are optional, matching what a real evaluator
+# (Dynamic_Trust_Evaluation/test_model.py's 門檻/分數/是否通過 output) would
+# send. Omit them to let the backend fall back to its own internal
+# simulation (see demo_web/README.md).
+#
+# Usage: simulate-ingest.sh <machine_id> <score> [threshold] [passed(true|false)]
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 source ./lib.sh
 
-MACHINE_ID=${1:?usage: simulate-ingest.sh <machine_id> <score> [backend_url]}
-SCORE=${2:?usage: simulate-ingest.sh <machine_id> <score> [backend_url]}
-BACKEND_URL=${3:-http://localhost:5181}
+MACHINE_ID=${1:?usage: simulate-ingest.sh <machine_id> <score> [threshold] [passed(true|false)]}
+SCORE=${2:?usage: simulate-ingest.sh <machine_id> <score> [threshold] [passed(true|false)]}
+THRESHOLD=${3:-}
+PASSED=${4:-}
+BACKEND_URL=http://localhost:5181
 
 GUID="$(python - "${GUID_MAP_FILE}" "${MACHINE_ID}" <<'PY'
 import json
@@ -29,8 +37,22 @@ if [ -z "${GUID}" ]; then
   exit 1
 fi
 
+BODY="$(python - "${SCORE}" "${THRESHOLD}" "${PASSED}" <<'PY'
+import json
+import sys
+
+score, threshold, passed = sys.argv[1:4]
+body = {"score": float(score)}
+if threshold:
+    body["threshold"] = float(threshold)
+if passed:
+    body["passed"] = passed.lower() == "true"
+print(json.dumps(body))
+PY
+)"
+
 curl -sS -X POST "${BACKEND_URL}/api/ingest" \
   -H "Content-Type: application/json" \
   -H "X-Device-Guid: ${GUID}" \
-  -d "{\"score\": ${SCORE}}"
+  -d "${BODY}"
 echo

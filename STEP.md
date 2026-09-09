@@ -209,7 +209,7 @@ curl -X POST http://localhost:5181/api/ingest -d '{"score":95}'
 ```bash
 bash scripts/simulate-ingest.sh 1 95
 ```
-會印出 `{"machineId":1，"status":"ok"}`，這是正確的結果。回到瀏覽器頁面，機台 1 的分數應該會更新成 95.0。
+會印出 `{"machineId":1，"status":"ok"}`，這是正確的結果。回到瀏覽器頁面，機台 1 的分數應該會更新成 95.0。這裡沒有帶門檻，後端會自己模擬一個(浮動在 50~70 之間)。
 
 **情境 C:已上線機台、分數持續偏低，會被暫時封鎖**
 
@@ -219,6 +219,26 @@ bash scripts/simulate-ingest.sh 1 95
 bash scripts/simulate-ingest.sh 1 20
 ```
 前幾次會回 `{"machineId":1，"status":"ok"}`，第 4 次左右開始會變成 `{"machineId":1，"status":"dropped"}`——代表系統偵測到分數持續異常，開始擋掉這台機台的資料。回到瀏覽器頁面，右下角面板會顯示「已截斷」。
+
+**情境 D:直接傳「門檻」+「是否通過」(模擬真正評估器接進來的樣子)**
+
+`simulate-ingest.sh` 除了機台編號、分數，還可以多帶兩個參數：門檻、是否通過(`true`/`false`)。這是為了模擬以後真的接上 AI 評估器時，評估器會直接把算好的「門檻」跟「是否通過」丟給後端，後端不用自己重新判斷，直接採信評估器給的 `true`/`false`。
+
+分數低於門檻、評估器也說沒通過：
+
+```bash
+bash scripts/simulate-ingest.sh 1 50 90 false
+```
+
+連續打 4~5 次(跟情境 C 一樣，每次間隔 1 秒)，會看到判定「異常」，幾秒後觸發截斷。
+
+分數高於門檻、評估器說有通過：
+
+```bash
+bash scripts/simulate-ingest.sh 1 90 50 true
+```
+
+打一次就會看到判定「正常」。回到瀏覽器頁面，版1面板「詳細資訊」那邊的信任分數門檻會標示「(由評估器提供)」，跟情境 B/C 標示「(動態模擬，...)」不一樣——因為這裡的門檻是我們直接傳進去的，不是後端自己模擬的。
 
 ---
 

@@ -121,7 +121,12 @@ const DiagnosisPanel = {
         .join(' ')
     })
 
-    return { diagnosis, error, chartPoints }
+    const thresholdY = computed(() => {
+      const t = diagnosis.value?.threshold
+      return 100 - Math.max(0, Math.min(100, t ?? 50))
+    })
+
+    return { diagnosis, error, chartPoints, thresholdY }
   },
   template: `
     <section class="panel diagnosis-panel">
@@ -143,7 +148,7 @@ const DiagnosisPanel = {
           <div class="score-chart-wrap">
             <div class="score-axis"><span>100</span><span>50</span><span>0</span></div>
             <svg class="score-chart" viewBox="0 0 100 100" preserveAspectRatio="none">
-              <line class="threshold-line" x1="0" y1="50" x2="100" y2="50" />
+              <line class="threshold-line" x1="0" :y1="thresholdY" x2="100" :y2="thresholdY" />
               <polyline :points="chartPoints" />
             </svg>
           </div>

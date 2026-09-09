@@ -7,6 +7,7 @@ demo_web/
 ├── backend/
 │   ├── app.py                  # 主要 Flask app
 │   ├── fdo_client.py           # 背景輪詢 FDO Owner server，快取「哪些機台真的上線了」
+│   ├── dynamic_trust.py        # 動態信任門檻（Dynamic_Trust_Evaluation 的 Fuzzy 引擎精簡版）
 │   ├── guid_machine_map.json   # (執行期產生，gitignore) FDO guid -> 機台編號 對照表
 │   └── requirements.txt
 └── frontend/
@@ -56,15 +57,37 @@ POST /api/ingest
 X-Device-Guid: <該機台上線後拿到的 FDO guid>
 Content-Type: application/json
 
-{"score": 87.5}
+{"score": 87.5, "threshold": 62.3, "passed": true}
 ```
 
+`threshold`、`passed` 都是選填的。
+
 1. **關卡 A — FDO 身分**：`X-Device-Guid` 要能在 `guid_machine_map.json` 查到對應機台，且該機台要被 FDO Owner server 承認「已完成上線」。任一項不過 → `403`。這一關的資料來源是 `fdo-integration/`（見該資料夾的 README），不是這裡的程式碼自己生成的。
-2. **關卡 B — 信任分數**：`score` 低於 `SCORE_THRESHOLD`（預設 50）持續超過 `ABNORMAL_SUSTAIN_SECONDS`（預設 4 秒）→ 觸發截斷 `BLOCK_DURATION_SECONDS`（預設 7 秒）。截斷期間收到的請求一樣回 `200 {"status": "dropped"}`，但資料不會被處理。這樣可以在 demo 時清楚示範「信任分數不只是顯示，還真的會拿來擋可疑機台」。
+2. **關卡 B — 信任分數**：機台被判定「異常」持續超過 `ABNORMAL_SUSTAIN_SECONDS`（預設 4 秒）→ 觸發截斷 `BLOCK_DURATION_SECONDS`（預設 7 秒）。截斷期間收到的請求一樣回 `200 {"status": "dropped"}`，但資料不會被處理。這樣可以在 demo 時清楚示範「信任分數不只是顯示，還真的會拿來擋可疑機台」。「是否異常」怎麼判定，見下面「`passed` 由誰決定」。
 
 兩關分開設計、分開回應（403 vs 200 dropped），這樣可以清楚展示「陌生裝置直接被拒」跟「合法裝置但分數持續異常被截斷」是兩種不同的狀況。
 
 `compute_diagnosis()`（`app.py` 裡）目前是一個固定回傳高分的 stub，是留給接 AI 判斷邏輯的人（負責 API 串接的組員）替換的——如果 POST body 裡有帶 `score` 就直接用那個值，沒帶才會落到這個 stub。
+
+### 信任分數門檻、是否通過：由評估器提供，或後端內部模擬
+
+這組欄位設計對應到 `Dynamic_Trust_Evaluation/test_model.py` 裡 `evaluate_model()` 本來就會輸出的格式（`門檻`、`分數`、`是否通過`）——真正的評估流程（XGBoost 信任分數 + Fuzzy 動態門檻）算完之後，直接把 `threshold`、`score`、`passed` 一起傳給 `/api/ingest` 就好，demo_web 後端不需要自己知道那 35 個網路/系統特徵長什麼樣子，也不用重新判斷一次，只負責接收評估結果、執行「持續異常幾秒就截斷」這個狀態機。
+
+**`threshold`（信任分數門檻）：**
+- **有帶**（`threshold_source: "external"`）：直接採用呼叫端算好的值。
+- **沒帶**（`threshold_source: "internal"`，例如 `simulate-ingest.sh` 只帶 `score` 的舊式呼叫）：後端用 `dynamic_trust.py`（`Dynamic_Trust_Evaluation/fuzzy_inference.py` 的精簡版，只保留「環境風險模糊推論」，不依賴 pandas/xgboost）自己模擬一個：
+
+  ```
+  threshold = (0.60 + env_risk_score × 0.10) × 100     # 結果落在 50~70 之間
+  ```
+
+  `env_risk_score` 目前是用 `fuzzy_threshold_config.json` 裡每個特徵本來就記錄的 `mu`/`sigma`（平均值/標準差）做常態分布隨機取樣模擬出來的，純粹是「還沒有真評估器時」的過渡 fallback。
+
+**`passed`（是否通過，布林值）：**
+- **有帶**：後端直接採信這個判斷（`abnormal = not passed`），**不會**再拿 `score` 跟 `threshold` 重新比較一次——即使 `score` 看起來明明高於 `threshold`，只要 `passed` 是 `false`，一樣視為異常。這樣評估器不用擔心後端的比較邏輯（例如 `<` 還是 `<=`）跟自己不一致。
+- **沒帶**：後端才自己比較 `score < threshold`。
+
+算出來的門檻、來源、（內部模擬時的）環境風險係數、是否異常存在每台機台的 `threshold`/`threshold_source`/`env_risk`/`abnormal` 欄位裡，`/api/machines/<id>/diagnosis` 會回傳 `threshold`，前端折線圖那條門檻虛線就是照這個值畫的。
 
 ## 前端
 
