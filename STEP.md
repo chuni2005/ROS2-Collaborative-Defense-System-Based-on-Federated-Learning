@@ -6,6 +6,16 @@
 
 ---
 
+## 第 -1 部:確認你的FDO資料夾底下三個資料夾不是空的
+
+```bash
+git submodule update --init --recursive
+```
+
+---
+
+---
+
 ## 第 0 步:確認你在對的資料夾
 
 打開 Git Bash 之後，先打:
