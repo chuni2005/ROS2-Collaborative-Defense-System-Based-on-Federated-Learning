@@ -8,3 +8,18 @@ model_training/model
 model_training/val-data
 model_training/test-data
 output_models
+
+# analyze/ 底下的分析用備份／暫存，見 CLAUDE.md 規則 1 的 analyze/ 例外
+analyze/*_archived.ipynb
+
+# analyze/ 底下團隊丟進來的大型資料／模型檔案，以及跑一次分析就會重新產生的
+# 快取／圖檔——不是原始碼，也不該進版控（test.csv 2.76GB、category_map.json
+# 432MB，遠超過 GitHub 單檔 100MB 上限；其餘都能用 build_predictions.py /
+# plot_*.py 重新產生，沒有版控的必要）
+analyze/test.csv
+analyze/*.ubj
+analyze/*.log
+analyze/figures/
+analyze/results/*.parquet
+analyze/results/category_map.json
+analyze/results/preds_*.csv
