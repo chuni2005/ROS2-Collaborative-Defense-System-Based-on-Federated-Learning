@@ -86,7 +86,7 @@ class FuzzyDynamicTrustEngine:
 
         return 0.0 if denominator == 0 else numerator / denominator
 
-    def evaluate_trust(self, trust_score, env_context, base_threshold=0.60, max_adj=0.10):
+    def evaluate_trust(self, trust_score, env_context, base_threshold=0.50, max_adj=0.10):
         env_risk_score = self.defuzzify_risk_level(env_context)
         dynamic_threshold = base_threshold + (env_risk_score * max_adj)
         decision = "ALLOW" if trust_score >= dynamic_threshold else "DENY"
@@ -166,6 +166,12 @@ def evaluate_model(model_path: str | Path, test_data) -> None:
         test_source_name = str(Path(test_data))
 
     for chunk_df in chunks:
+        target_col = next((c for c in ['attack', 'label', 'Label', 'class', 'Attack'] if c in chunk_df.columns), None)
+        if target_col:
+            original_attack_labels = chunk_df[target_col].values
+        else:
+            original_attack_labels = ["Unknown"] * len(chunk_df)
+
         df = preprocess_data(chunk_df)
 
         if "attack" not in df.columns:
@@ -185,7 +191,7 @@ def evaluate_model(model_path: str | Path, test_data) -> None:
         X = X.astype(np.float32)
         dtest = xgb.DMatrix(X)
         
-        # 分數軟化
+        # 分數軟化魔法
         raw_margins = booster.predict(dtest, output_margin=True)
         T = 3.0 
         y_prob = 1.0 / (1.0 + np.exp(-raw_margins / T))
@@ -203,6 +209,7 @@ def evaluate_model(model_path: str | Path, test_data) -> None:
             all_y_true.append(y_true_chunk[i])
 
             output_data = {
+                "封包類別": str(original_attack_labels[i]),
                 "門檻": round(float(dyn_th), 4),
                 "分數": round(float(trust_score), 4),
                 "是否通過": is_allowed
@@ -236,17 +243,58 @@ def evaluate_model(model_path: str | Path, test_data) -> None:
     print(classification_report(y_true, y_pred, digits=4, zero_division=0))
 
 
+# if __name__ == "__main__":
+#     base_dir = Path(__file__).resolve().parent
+    
+#     log_path = base_dir / "evaluation.log"
+#     sys.stdout = Logger(filename=str(log_path))
+    
+#     model_path = base_dir / "global_model_latest_0908.ubj"
+#     test_csv_path = base_dir / "test-001.csv"
+    
+#     if not test_csv_path.exists():
+#         print(f"❌ 找不到測試資料，請確認 {test_csv_path} 是否存在！")
+#         sys.exit(1)
+
+#     evaluate_model(model_path, test_csv_path)
+
 if __name__ == "__main__":
     base_dir = Path(__file__).resolve().parent
     
-    log_path = base_dir / "evaluation.log"
-    sys.stdout = Logger(filename=str(log_path))
+    # 你的模型路徑
+    model_path = base_dir / "global_model_latest_0908.ubj"
     
-    model_path = base_dir / "global_model_latest (1).ubj"
-    test_csv_path = base_dir / "test.csv"
+    # 剛剛分割出來的資料夾路徑
+    split_dir = base_dir / "attack_dataset_splits_001"
     
-    if not test_csv_path.exists():
-        print(f"❌ 找不到測試資料，請確認 {test_csv_path} 是否存在！")
+    if not split_dir.exists():
+        print(f"❌ 找不到分割資料夾，請確認 {split_dir} 是否存在！")
         sys.exit(1)
 
-    evaluate_model(model_path, test_csv_path)
+    # 找出資料夾內所有的 CSV 檔案
+    csv_files = list(split_dir.glob("*.csv"))
+    
+    if not csv_files:
+        print(f"❌ {split_dir} 裡面沒有任何 CSV 檔案！")
+        sys.exit(1)
+
+    original_stdout = sys.__stdout__
+
+    for csv_file in csv_files:
+        log_path = base_dir / f"evaluation_{csv_file.stem}.log"
+        
+        sys.stdout = Logger(filename=str(log_path))
+        
+        print(f"\n" + "="*50)
+        print(f"🚀 開始評估資料集: {csv_file.name}")
+        print(f"📁 儲存日誌於: {log_path.name}")
+        print(f"="*50 + "\n")
+        
+        evaluate_model(model_path, csv_file)
+        
+        if hasattr(sys.stdout, 'log'):
+            sys.stdout.log.close()
+            
+        sys.stdout = original_stdout
+        
+    print("\n✅ 所有 7 個分割檔案皆已評估完畢，Log 已全部分別儲存！")
