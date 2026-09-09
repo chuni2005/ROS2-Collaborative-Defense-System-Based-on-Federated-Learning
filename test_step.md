@@ -6,13 +6,11 @@
 
 ---
 
-## 第 -1 部:確認你的FDO資料夾底下三個資料夾不是空的
+## 第 -1 步:確認你的 FDO 資料夾底下三個資料夾不是空的
 
 ```bash
 git submodule update --init --recursive
 ```
-
----
 
 ---
 
@@ -50,6 +48,38 @@ docker version
 ```
 
 **怎麼知道成功**:畫面印出兩大段文字，一段開頭是 `Client:`，一段開頭是 `Server:`，兩段都有印出來，中間沒有紅字錯誤訊息。
+
+**實際執行畫面**(2026-09-10 本機實測):
+```
+Client:
+ Version:           29.0.1
+ API version:       1.52
+ Go version:        go1.25.4
+ Git commit:        eedd969
+ Built:             Fri Nov 14 16:19:55 2025
+ OS/Arch:           windows/amd64
+ Context:           desktop-linux
+
+Server: Docker Desktop 4.53.0 (211793)
+ Engine:
+  Version:          29.0.1
+  API version:      1.52 (minimum version 1.44)
+  Go version:       go1.25.4
+  Git commit:       198b5e3
+  Built:            Fri Nov 14 16:17:57 2025
+  OS/Arch:          linux/amd64
+  Experimental:     false
+ containerd:
+  Version:          v2.1.5
+  GitCommit:        fcd43222d6b07379a4be9786bda52438f0dd16a1
+ runc:
+  Version:          1.3.3
+  GitCommit:        v1.3.3-0-gd842d771
+ docker-init:
+  Version:          0.19.0
+  GitCommit:        de40ad0
+```
+(版本號會依你安裝的 Docker Desktop 版本不同，重點是 Client/Server 兩段都印出來、沒有紅字錯誤。)
 
 **如果失敗**(例如出現 `error during connect` 這種字):代表 Docker Desktop 還沒完全啟動好，再等一下，重新打一次 `docker version`。
 
@@ -97,9 +127,18 @@ bash scripts/02-up-servers.sh
 docker ps
 ```
 
-應該要看到 3 行，名稱分別是 `manufacturer`、`rendezvous`、`owner`，狀態欄(STATUS)開頭是 `Up`(後面可能還會寫 `unhealthy`，這個沒關係，它跟服務有沒有正常運作是兩回事)。
+應該要看到 3 行，名稱分別是 `manufacturer`、`rendezvous`、`owner`，狀態欄(STATUS)開頭是 `Up`(後面可能還會寫 `unhealthy` 或 `health: starting`，這個沒關係，它跟服務有沒有正常運作是兩回事)。
 
-**這一步也只需要做一次**，除非你之後有跑過關閉的指令(第 8 步)。
+**實際執行畫面**(2026-09-10 本機實測):
+```
+CONTAINER ID   IMAGE              COMMAND                   CREATED        STATUS                            PORTS                                         NAMES
+45e12e3d5548   go-fdo-server      "go-fdo-server --db-…"   8 days ago     Up 9 seconds (health: starting)   0.0.0.0:8041->8041/tcp, [::]:8041->8041/tcp   rendezvous
+9beaf4d20e61   go-fdo-server      "go-fdo-server --db-…"   8 days ago     Up 9 seconds (health: starting)   0.0.0.0:8038->8038/tcp, [::]:8038->8038/tcp   manufacturer
+4421d43e880c   go-fdo-server      "go-fdo-server --db-…"   8 days ago     Up 9 seconds (health: starting)   0.0.0.0:8043->8043/tcp, [::]:8043->8043/tcp   owner
+```
+(`CREATED` 顯示 8 天前是因為這幾個 container 是之前建的、這次只是重新啟動；你第一次跑會顯示剛建立。)
+
+**這一步也只需要做一次**，除非你之後有跑過關閉的指令(第 10 步)。
 
 ---
 
@@ -170,8 +209,13 @@ python demo_web/backend/app.py
 
 **怎麼知道成功**:畫面印出類似:
 ```
+* Serving Flask app 'app'
+* Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
 * Running on http://127.0.0.1:5181
+Press CTRL+C to quit
 ```
+(以上是 2026-09-10 本機實測的完整開機畫面，WARNING 那行是 Flask 內建開發伺服器的固定提醒，不是錯誤。)
 
 **這個視窗接下來不要關掉、不要按 Ctrl+C**，關掉網頁就會停止運作。如果之後要做別的事，開一個新的 Git Bash 視窗，不要動這個。
 
@@ -238,7 +282,7 @@ bash scripts/simulate-ingest.sh 1 50 90 false
 bash scripts/simulate-ingest.sh 1 90 50 true
 ```
 
-打一次就會看到判定「正常」。回到瀏覽器頁面，版1面板「詳細資訊」那邊的信任分數門檻會標示「(由評估器提供)」，跟情境 B/C 標示「(動態模擬，...)」不一樣——因為這裡的門檻是我們直接傳進去的，不是後端自己模擬的。
+打一次就會看到判定「正常」。回到瀏覽器頁面，機台 1 面板「詳細資訊」那邊的信任分數門檻會標示「(由評估器提供)」，跟情境 B/C 標示「(動態模擬，...)」不一樣——因為這裡的門檻是我們直接傳進去的，不是後端自己模擬的。
 
 ---
 
@@ -273,3 +317,6 @@ bash scripts/05-teardown.sh --purge
 
 **Q: 每次都要重跑全部 10 步嗎?**
 不用。開機重來的話，通常只需要:第 1 步(開 Docker Desktop)→ 第 4 步(啟動伺服器，如果沒跑過 `05-teardown.sh` 甚至可以跳過，因為 container 可能還在)→ 第 7、8 步(啟動網頁)。第 3、5、6 步做過一次之後，除非你有跑過 `--purge` 清掉，不然不用重做。
+
+**Q: 這份文件跟 demo_step.md 差在哪?**
+這份文件是純手動測試網頁後端邏輯(用 curl / `simulate-ingest.sh` 自己打分數進去)，不需要訓練好的模型。想看「真正訓練好的模型」把分數即時推進網頁的完整流程，請看 [demo_step.md](demo_step.md)。
