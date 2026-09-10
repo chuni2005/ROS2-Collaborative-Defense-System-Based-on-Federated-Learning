@@ -176,6 +176,13 @@ bash scripts/04-onboard-machine.sh 1
 
 看到最後這行，就代表機台 1 成功上線了。後面的步驟都用機台 1 示範，其他機台編號同理。
 
+```bash
+bash scripts/04-onboard-machine.sh 2
+bash scripts/04-onboard-machine.sh 3
+bash scripts/04-onboard-machine.sh 4
+bash scripts/04-onboard-machine.sh 5
+```
+
 ---
 
 ## 第 7 步:啟動網頁
