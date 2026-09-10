@@ -5,7 +5,7 @@ import sys
 import subprocess
 import time
 import shutil
-
+import pandas as pd
 from split import (
     Chunk,
     RandomStrategy,
@@ -13,12 +13,13 @@ from split import (
     StratifiedStrategy,
     SequentialStrategy,
 )
+from preprocessing import build_category_maps, DEFAULT_CATEGORY_MAPS_FILENAME
 
 # GLOBAL
 NUM_CLIENTS = 7
-NUM_ROUNDS = 3
-TEST_RATIO = 0.1  #  ratio of every attack class
-VAL_RATIO = 0.03  #  ratio of every attack class
+NUM_ROUNDS = 5 # 3
+TEST_RATIO = 0.05  #  ratio of every attack class
+VAL_RATIO = 0.003  #  ratio of every attack class
 SERVER_ADDRESS = "127.0.0.1:8080"
 AGG_Mode = "bagging"
 
@@ -28,7 +29,7 @@ SPLIT_UNIT = 1000  # per chunks  # ss=1000
 RANDOM_SEED = 42
 
 # PATHS
-TARGET_DATA = "../ROSPaCe_complete/ROSPaCe_complete_noperiodicity.csv"
+TARGET_DATA = "../ROSPaCe_complete/ROSPaCe_complete.csv"
 SPLIT_DIR = "split-data"
 TEST_DIR = "test-data"
 VAL_DIR = "val-data"
@@ -36,6 +37,7 @@ TEST_DATA = f"{TEST_DIR}/test.csv"
 VALIDATION_DATA = f"{VAL_DIR}/val.csv"
 LOG_DIR = "logs"
 MODEL_DIR = "model"
+CATEGORY_MAPS_FILE = DEFAULT_CATEGORY_MAPS_FILENAME
 
 
 class SysLogger(object):
@@ -66,8 +68,11 @@ class MainRunner(object):
         self.turn = 1
         self._init()
 
+        src_path = self._resolve_data_path()
+        self._build_category_maps(src_path)
+
         self.splitter = Splitter(
-            src_path=self._resolve_data_path(),
+            src_path=src_path,
             tmp_dir=os.path.join(self.base_dir, "tmp"),
             output_dir=os.path.join(self.base_dir, SPLIT_DIR),
             chart_dir=os.path.join(self.base_dir, "img"),
@@ -144,7 +149,7 @@ class MainRunner(object):
                     f"--server_address={SERVER_ADDRESS}",
                     f"--validation_data_path={VALIDATION_DATA}",
                     f"--aggregation={AGG_Mode}",
-                    f"--leaf_scale={1/NUM_CLIENTS}",
+                    f"--leaf_scale=0.5",
                 ],
                 stdout=server_log,
                 stderr=server_log,
@@ -244,6 +249,13 @@ class MainRunner(object):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)
+
+    def _build_category_maps(self, src_path):
+        category_maps_path = os.path.join(self.base_dir, CATEGORY_MAPS_FILE)
+        print(f"[Runner] Building shared category maps from {src_path} ...")
+        df_full = pd.read_csv(src_path, low_memory=False)
+        build_category_maps(df_full, save_path=category_maps_path)
+        del df_full
 
     def _resolve_data_path(self):
         if not TARGET_DATA:

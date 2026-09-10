@@ -1,6 +1,5 @@
 import argparse
 import os
-import re
 import numpy as np
 import pandas as pd
 import xgboost as xgb
@@ -11,68 +10,10 @@ from flwr.server.client_proxy import ClientProxy
 from sklearn.metrics import precision_score, recall_score, f1_score
 import json
 
+from preprocessing import preprocess_data, load_category_maps
+
 # precision/recall/F1 positive calss of attack lobel is 1
 POSITIVE_CLASS = 1
-
-
-def convert_type(x):
-    if (isinstance(x, (int, float, np.number)) and not pd.isna(x)) and not isinstance(
-        x, bool
-    ):
-        return x
-
-    if pd.isna(x) or x == "":
-        return ""
-
-    try:
-        num = pd.to_numeric(x)
-        return num
-    except Exception:
-        try:
-            return str(x)
-        except Exception:
-            return ""
-
-
-def preprocess_data(df):
-    feature_cols = [col for col in df.columns if col != "attack"]
-
-    if hasattr(df, "map"):
-        df[feature_cols] = df[feature_cols].map(convert_type)
-    else:
-        df[feature_cols] = df[feature_cols].applymap(convert_type)
-
-    df.replace([np.inf, -np.inf], -1, inplace=True)
-    df.fillna(-1, inplace=True)
-    df = df.dropna(thresh=1, axis=1)
-
-    if "attack" in df.columns:
-        attack_mapping = {
-            "observe": 0,
-            "metasploit SYN flood": 1,
-            "nmap discovery": 1,
-            "nmap SYN flood": 1,
-            "ros2 node crashing": 1,
-            "ros2 reconnaissance": 1,
-            "ros2 reflection": 1,
-        }
-        df["attack"] = df["attack"].replace(attack_mapping).infer_objects(copy=False)
-        df["attack"] = (
-            pd.to_numeric(df["attack"], errors="coerce").fillna(0).astype(int)
-        )
-
-    df = df.drop(
-        columns=[i for i in df.columns if "Unnamed" in i or "timestamp" in i],
-        errors="ignore",
-    )
-
-    non_numeric_cols = df.select_dtypes(exclude=[np.number, "bool"]).columns
-    for col in non_numeric_cols:
-        if col != "attack":
-            df[col] = pd.Categorical(df[col]).codes
-
-    df.columns = [re.sub(r"[\[\]<>]", "_", str(col)) for col in df.columns]
-    return df.astype(np.float32)
 
 
 def scale_leaf_values(model_json: bytes, w: float) -> bytes:
@@ -118,13 +59,18 @@ def aggregate_bagging_verified(
 
 class XGBoostStrategy(fl.server.strategy.FedAvg):
     def __init__(
-        self, model_dir: str, num_clients: int, val_data_path: Optional[str] = None
+        self,
+        model_dir: str,
+        num_clients: int,
+        val_data_path: Optional[str] = None,
+        category_maps_path: str = "category_maps.json",
     ):
         self.num_clients = num_clients
         self.model_dir = os.path.abspath(model_dir)
         os.makedirs(self.model_dir, exist_ok=True)
         self.latest_model_path = os.path.join(self.model_dir, "global_model_latest.ubj")
 
+        self.category_maps = load_category_maps(category_maps_path)
         self._load_eval_dataset(val_data_path)
 
         super().__init__(
@@ -139,7 +85,7 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
         if data_path and os.path.exists(data_path):
             print(f"[Info] Loading server-side validation data from {data_path}...")
             df_val = pd.read_csv(data_path, low_memory=False)
-            df_val = preprocess_data(df_val)
+            df_val = preprocess_data(df_val, self.category_maps)
             X_val = df_val.iloc[:, :-1]
             y_val = df_val.iloc[:, -1]
             self.dval = xgb.QuantileDMatrix(X_val, label=y_val)
@@ -290,9 +236,10 @@ class XGBoostBaggingStrategy(XGBoostStrategy):
         model_dir: str,
         num_clients: int,
         val_data_path: Optional[str] = None,
+        category_maps_path: str = "category_maps.json",
         leaf_scale: float = 1.0,
     ):
-        super().__init__(model_dir, num_clients, val_data_path)
+        super().__init__(model_dir, num_clients, val_data_path, category_maps_path)
         self.global_model_json: Optional[bytes] = None
         self.leaf_scale = leaf_scale
 
@@ -418,6 +365,13 @@ if __name__ == "__main__":
         help="Path to the validation data CSV file.",
     )
     parser.add_argument(
+        "--category_maps_path",
+        type=str,
+        default="category_maps.json",
+        help="Path to the shared category_maps.json produced once from the full "
+        "dataset (must match the file every client.py uses).",
+    )
+    parser.add_argument(
         "--aggregation",
         type=str,
         default="winner",
@@ -439,6 +393,7 @@ if __name__ == "__main__":
             model_dir=args.model_dir,
             num_clients=args.num_clients,
             val_data_path=args.validation_data_path,
+            category_maps_path=args.category_maps_path,
             leaf_scale=args.leaf_scale,
         )
     else:
@@ -446,6 +401,7 @@ if __name__ == "__main__":
             model_dir=args.model_dir,
             num_clients=args.num_clients,
             val_data_path=args.validation_data_path,
+            category_maps_path=args.category_maps_path,
         )
 
     print("[Info] Flower Server (XGBoost) is starting...")

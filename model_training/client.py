@@ -17,81 +17,24 @@ from flwr.common import (
 )
 import argparse
 import os
-import re
 import tempfile
 import traceback
 
+from preprocessing import preprocess_data, load_category_maps
+
 TENSOR_TYPE = "xgboost-ubj"
-NUM_BOOST_ROUND = 10
+NUM_BOOST_ROUND = 15  # 20
 POSITIVE_CLASS = 1
 ATTACK_SEED_BASE = 10000
+PENALTY_FOR_OBSERVE = 1.5
 
 
-def convert_type(x):
-    if (isinstance(x, (int, float, np.number)) and not pd.isna(x)) and not isinstance(
-        x, bool
-    ):
-        return x
-
-    if pd.isna(x) or x == "":
-        return ""
-
-    try:
-        num = pd.to_numeric(x)
-        return num
-    except Exception:
-        try:
-            return str(x)
-        except Exception:
-            return ""
-
-
-def preprocess_data(df):
-    feature_cols = [col for col in df.columns if col != "attack"]
-
-    if hasattr(df, "map"):
-        df[feature_cols] = df[feature_cols].map(convert_type)
-    else:
-        df[feature_cols] = df[feature_cols].applymap(convert_type)
-
-    df.replace([np.inf, -np.inf], -1, inplace=True)
-    df.fillna(-1, inplace=True)
-    df = df.dropna(thresh=1, axis=1)
-
-    if "attack" in df.columns:
-        attack_mapping = {
-            "observe": 0,
-            "metasploit SYN flood": 1,
-            "nmap discovery": 1,
-            "nmap SYN flood": 1,
-            "ros2 node crashing": 1,
-            "ros2 reconnaissance": 1,
-            "ros2 reflection": 1,
-        }
-        df["attack"] = df["attack"].replace(attack_mapping).infer_objects(copy=False)
-        df["attack"] = (
-            pd.to_numeric(df["attack"], errors="coerce").fillna(0).astype(int)
-        )
-
-    df = df.drop(
-        columns=[i for i in df.columns if "Unnamed" in i or "timestamp" in i],
-        errors="ignore",
-    )
-
-    non_numeric_cols = df.select_dtypes(exclude=[np.number, "bool"]).columns
-    for col in non_numeric_cols:
-        if col != "attack":
-            df[col] = pd.Categorical(df[col]).codes
-
-    df.columns = [re.sub(r"[\[\]<>]", "_", str(col)) for col in df.columns]
-    return df.astype(np.float32)
-
-
-def load_local_data(client_id, data_path, eval_data_path=None):
+def load_local_data(client_id, data_path, category_maps_path, eval_data_path=None):
     print(f"\n[Info] [Client {client_id}] Loading local training data: {data_path}")
 
+    category_maps = load_category_maps(category_maps_path)
     df_train_raw = pd.read_csv(data_path, low_memory=False)
-    df_train_cleaned = preprocess_data(df_train_raw)
+    df_train_cleaned = preprocess_data(df_train_raw, category_maps)
 
     label = df_train_cleaned["attack"]
     features = df_train_cleaned.drop(["attack"], axis=1)
@@ -138,11 +81,19 @@ def load_local_data(client_id, data_path, eval_data_path=None):
         f"(by features): {n_dup_in_test} / {len(x_test_local)}"
     )
 
+    sample_weights = np.ones(len(y_train))
+    sample_weights[y_train == 0] = PENALTY_FOR_OBSERVE
+
     dtrain = xgb.DMatrix(
-        x_train.values, label=y_train.values, feature_names=train_feature_names
+        x_train.values,
+        label=y_train.values,
+        feature_names=train_feature_names,
+        weight=sample_weights,
     )
     dval = xgb.DMatrix(
-        x_val.values, label=y_val.values, feature_names=train_feature_names
+        x_val.values,
+        label=y_val.values,
+        feature_names=train_feature_names,
     )
     dtest_local = xgb.DMatrix(
         x_test_local.values,
@@ -171,7 +122,15 @@ def load_local_data(client_id, data_path, eval_data_path=None):
 
 class XGBoostClient(fl.client.Client):
 
-    def __init__(self, client_id, data_path, eval_data_path=None, aggregation="winner", turn=0):
+    def __init__(
+        self,
+        client_id,
+        data_path,
+        category_maps_path,
+        eval_data_path=None,
+        aggregation="winner",
+        turn=0,
+    ):
         self.client_id = client_id
         self.aggregation = aggregation
         self.turn = turn
@@ -185,15 +144,15 @@ class XGBoostClient(fl.client.Client):
             self.num_train,
             self.num_test,
             self.y_test_local,
-        ) = load_local_data(client_id, data_path, eval_data_path)
+        ) = load_local_data(client_id, data_path, category_maps_path, eval_data_path)
 
         self.bst = None
         self.current_round = 0
         self.model_load_failures = 0
         self.params = {
             "objective": "binary:logistic",
-            "eta": 0.1,
-            "max_depth": 5,
+            "eta": 0.3,
+            "max_depth": 8,
             "eval_metric": ["logloss"],
             "tree_method": "hist",
         }
@@ -256,7 +215,8 @@ class XGBoostClient(fl.client.Client):
         output_dir = os.path.join(os.getcwd(), "output_models")
         os.makedirs(output_dir, exist_ok=True)
         artifact_path = os.path.join(
-            output_dir, f"client_{self.client_id}_turn_{self.turn}_round_{self.current_round}.ubj"
+            output_dir,
+            f"client_{self.client_id}_turn_{self.turn}_round_{self.current_round}.ubj",
         )
         self.bst.save_model(artifact_path)
         print(f"[Info] model saved: {artifact_path}")
@@ -479,6 +439,13 @@ if __name__ == "__main__":
         "--data_path", type=str, required=True, help="Local training data CSV path"
     )
     parser.add_argument(
+        "--category_maps_path",
+        type=str,
+        default="category_maps.json",
+        help="Path to the shared category_maps.json produced once from the full "
+        "dataset (must match the file server.py/test_model.py use).",
+    )
+    parser.add_argument(
         "--server_address",
         type=str,
         default=os.environ.get("SERVER_ADDRESS", "127.0.0.1:8080"),
@@ -493,10 +460,7 @@ if __name__ == "__main__":
         "model each round (default). bagging = send only this round's new trees.",
     )
     parser.add_argument(
-        "--turn",
-        type=int,
-        default=0,
-        help="the turn of training (for save model)"
+        "--turn", type=int, default=0, help="the turn of training (for save model)"
     )
     args = parser.parse_args()
 
@@ -504,6 +468,10 @@ if __name__ == "__main__":
     fl.client.start_client(
         server_address=args.server_address,
         client=XGBoostClient(
-            args.client_id, args.data_path, aggregation=args.aggregation, turn=args.turn
+            args.client_id,
+            args.data_path,
+            args.category_maps_path,
+            aggregation=args.aggregation,
+            turn=args.turn,
         ),
     )
