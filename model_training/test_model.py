@@ -4,6 +4,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import xgboost as xgb
+try:
+    from .split.categorical import apply_category_mappings
+except ImportError:
+    from split.categorical import apply_category_mappings
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -59,6 +63,7 @@ def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
         columns=[col for col in df.columns if "Unnamed" in col or "timestamp" in col],
         errors="ignore",
     )
+    df = apply_category_mappings(df)
 
     non_numeric_cols = df.select_dtypes(exclude=[np.number, "bool"]).columns
     for col in non_numeric_cols:

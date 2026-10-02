@@ -9,6 +9,7 @@ import os
 import random
 
 from .structures import ChartImg, Chunk, IndexTable, OutputData, RowRecord, TempData
+from .categorical import DEFAULT_MAPPING_DIR, encode_categorical_csv
 
 
 class SplitStrategy(ABC):
@@ -30,9 +31,13 @@ class Splitter:
         chunk_num: int,
         strategy: SplitStrategy,
         hard_mode: bool = False,
+        mapping_dir: Path | str = DEFAULT_MAPPING_DIR,
     ):
         print("[Splitter] Initializing...")
         self.temp = TempData(Path(tmp_dir), src_path=Path(src_path))
+        encoded_path = encode_categorical_csv(self.temp.temp_data_path, mapping_dir)
+        if encoded_path is not None:
+            self.temp.replace_with(encoded_path)
         self.output = OutputData(Path(output_dir))
         self.chart = ChartImg(Path(chart_dir))
         self.chunk = Chunk(

@@ -21,6 +21,11 @@ import re
 import tempfile
 import traceback
 
+try:
+    from .split.categorical import apply_category_mappings
+except ImportError:
+    from split.categorical import apply_category_mappings
+
 TENSOR_TYPE = "xgboost-ubj"
 NUM_BOOST_ROUND = 10
 POSITIVE_CLASS = 1
@@ -77,6 +82,7 @@ def preprocess_data(df):
         columns=[i for i in df.columns if "Unnamed" in i or "timestamp" in i],
         errors="ignore",
     )
+    df = apply_category_mappings(df)
 
     non_numeric_cols = df.select_dtypes(exclude=[np.number, "bool"]).columns
     for col in non_numeric_cols:
