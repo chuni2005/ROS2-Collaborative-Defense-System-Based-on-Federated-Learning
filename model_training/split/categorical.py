@@ -73,11 +73,14 @@ def _save_mapping(
 
 
 def encode_categorical_csv(
-    csv_path: Path | str, mapping_dir: Path | str = DEFAULT_MAPPING_DIR
+    csv_path: Path | str,
+    mapping_dir: Path | str = DEFAULT_MAPPING_DIR,
+    output_dir: Path | str | None = None,
 ) -> Optional[Path]:
     """Encode nonnumeric columns in a CSV using persistent, shared category IDs."""
     csv_path = Path(csv_path)
     mapping_dir = Path(mapping_dir)
+    output_dir = Path(output_dir) if output_dir is not None else csv_path.parent
 
     with csv_path.open("r", encoding="utf-8-sig", newline="") as source:
         reader = csv.reader(source)
@@ -102,6 +105,7 @@ def encode_categorical_csv(
         return None
 
     mapping_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
     paths: Dict[str, Path] = {}
     mappings: Dict[str, Dict[str, int]] = {}
     for header, is_categorical in zip(headers, categorical):
@@ -126,6 +130,31 @@ def encode_categorical_csv(
         header: max(mapping.values(), default=-1) + 1
         for header, mapping in mappings.items()
     }
+
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as source:
+        reader = csv.reader(source)
+        next(reader, None)
+        for row in reader:
+            for index, header in enumerate(headers):
+                if header not in paths or index >= len(row):
+                    continue
+                value = row[index]
+                if not value:
+                    continue
+                mapping = mappings[header]
+                if value not in mapping:
+                    mapping[value] = next_ids[header]
+                    next_ids[header] += 1
+                counts[header][value] += 1
+
+    for header, path in paths.items():
+        _save_mapping(path, header, mappings[header], counts[header])
+        print(
+            f"[Splitter] Categorical column '{header}': "
+            f"{len(mappings[header])} values mapped; "
+            f"{sum(counts[header].values())} non-empty rows counted."
+        )
+
     temporary_path: Optional[str] = None
     try:
         with csv_path.open("r", encoding="utf-8-sig", newline="") as source:
@@ -135,7 +164,7 @@ def encode_categorical_csv(
                 "w",
                 encoding="utf-8",
                 newline="",
-                dir=csv_path.parent,
+                dir=output_dir,
                 suffix=".encoded",
                 delete=False,
             ) as target:
@@ -151,21 +180,15 @@ def encode_categorical_csv(
                         if not value:
                             encoded_row[index] = "-1"
                             continue
-                        mapping = mappings[header]
-                        if value not in mapping:
-                            mapping[value] = next_ids[header]
-                            next_ids[header] += 1
-                        counts[header][value] += 1
-                        encoded_row[index] = str(mapping[value])
+                        try:
+                            encoded_row[index] = str(mappings[header][value])
+                        except KeyError as error:
+                            raise ValueError(
+                                f"Category {value!r} in column {header!r} "
+                                "changed while encoding the CSV."
+                            ) from error
                     writer.writerow(encoded_row)
 
-        for header, path in paths.items():
-            _save_mapping(path, header, mappings[header], counts[header])
-            print(
-                f"[Splitter] Categorical column '{header}': "
-                f"{len(mappings[header])} values mapped; "
-                f"{sum(counts[header].values())} non-empty rows counted."
-            )
         return Path(temporary_path)
     except Exception:
         if temporary_path and os.path.exists(temporary_path):

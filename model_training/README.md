@@ -30,9 +30,9 @@
 
 ## 類別欄位 ID
 
-建立 splitter 時會以串流方式掃描來源 CSV。非數字的特徵欄位會在 `model_training/json/<欄位名稱>.json` 建立共用 ID；JSON 同時記錄類別 ID 與來源筆數。既有類別沿用原 ID，新類別從目前最大 ID 往後新增；`attack` 標籤維持原格式。輸出的 test、validation 與 client chunk CSV 會以 ID 取代這些類別字串。
+建立 splitter 時會以串流方式掃描原始來源 CSV。非數字的特徵欄位會在 `model_training/json/<欄位名稱>.json` 建立共用 ID；JSON 同時記錄類別 ID 與來源筆數。既有類別沿用原 ID，新類別從目前最大 ID 往後新增；`attack` 標籤維持原格式。建立 JSON 後，會在 `tmp` 產生類別已替換的暫存 CSV，並以此檔案建立 index table、執行後續切分；原始來源 CSV 不會被修改。輸出的 test、validation 與 client chunk CSV 會以 ID 取代這些類別字串。
 
-client、server 與 `test_model.py` 會載入相同的 JSON 對照表；未見過的字串類別會轉成 `-1`。數字欄位不建立映射。掃描和轉檔逐列進行，不會把整份來源 CSV 載入記憶體；記憶體用量主要取決於類別唯一值數量。
+client、server 與 `test_model.py` 直接使用 splitter 輸出的類別 ID，不會在模型訓練或評估時再次載入 JSON。數字欄位不建立映射。掃描和轉檔逐列進行，不會把整份來源 CSV 載入記憶體；記憶體用量主要取決於類別唯一值數量。
 
 ## 切分方法
 

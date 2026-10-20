@@ -17,8 +17,8 @@ from split import (
 # GLOBAL
 NUM_CLIENTS = 7
 NUM_ROUNDS = 3
-TEST_RATIO = 0.1  #  ratio of every attack class
-VAL_RATIO = 0.03  #  ratio of every attack class
+TEST_RATIO = 0.001  #  ratio of every attack class
+VAL_RATIO = 0.0003  #  ratio of every attack class
 SERVER_ADDRESS = "127.0.0.1:8080"
 AGG_Mode = "bagging"
 

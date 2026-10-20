@@ -1,6 +1,7 @@
 __pycache__
-ROSPace_complete
+ROSPace_*
 model_training/logs
+model_training/json
 model_training/tmp
 model_training/split-data
 model_training/img

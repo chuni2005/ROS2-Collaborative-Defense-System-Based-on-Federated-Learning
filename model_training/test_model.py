@@ -4,10 +4,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-try:
-    from .split.categorical import apply_category_mappings
-except ImportError:
-    from split.categorical import apply_category_mappings
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -63,8 +59,6 @@ def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
         columns=[col for col in df.columns if "Unnamed" in col or "timestamp" in col],
         errors="ignore",
     )
-    df = apply_category_mappings(df)
-
     non_numeric_cols = df.select_dtypes(exclude=[np.number, "bool"]).columns
     for col in non_numeric_cols:
         if col != "attack":
@@ -116,7 +110,7 @@ def evaluate_model(model_path: str | Path, test_csv_path: str | Path) -> None:
 
 if __name__ == "__main__":
     base_dir = Path(__file__).resolve().parent
-    model_path = base_dir / "model" / "stratified_strategy" / "global_model_latest.ubj"
-    test_csv_path = base_dir / "test-data" / "stratified_strategy" / "test.csv"
+    model_path = base_dir / "model" / "global_model_latest.ubj"
+    test_csv_path = base_dir / "test-data" / "test.csv"
 
     evaluate_model(model_path, test_csv_path)

@@ -35,7 +35,9 @@ class Splitter:
     ):
         print("[Splitter] Initializing...")
         self.temp = TempData(Path(tmp_dir), src_path=Path(src_path))
-        encoded_path = encode_categorical_csv(self.temp.temp_data_path, mapping_dir)
+        encoded_path = encode_categorical_csv(
+            src_path, mapping_dir, output_dir=self.temp.temp_data_dir
+        )
         if encoded_path is not None:
             self.temp.replace_with(encoded_path)
         self.output = OutputData(Path(output_dir))
