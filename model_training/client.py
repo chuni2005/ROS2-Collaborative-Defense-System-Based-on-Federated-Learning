@@ -287,7 +287,7 @@ def convert_type(x):
         return x
 
     if pd.isna(x) or x == "":
-        return ""
+        return np.nan
 
     try:
         num = pd.to_numeric(x)
@@ -330,11 +330,6 @@ def preprocess_data(df):
         columns=[i for i in df.columns if "Unnamed" in i or "timestamp" in i],
         errors="ignore",
     )
-    non_numeric_cols = df.select_dtypes(exclude=[np.number, "bool"]).columns
-    for col in non_numeric_cols:
-        if col != "attack":
-            df[col] = pd.Categorical(df[col]).codes
-
     df.columns = [re.sub(r"[\[\]<>]", "_", str(col)) for col in df.columns]
     return df.astype(np.float32)
 
@@ -451,6 +446,7 @@ class XGBoostClient(fl.client.Client):
         self.model_load_failures = 0
         self.params = {
             "objective": "binary:logistic",
+            "base_score": 0.5,
             "eta": 0.1,
             "max_depth": 5,
             "eval_metric": ["logloss"],

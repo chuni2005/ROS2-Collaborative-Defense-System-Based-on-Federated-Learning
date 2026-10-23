@@ -22,7 +22,7 @@ def convert_type(x):
         return x
 
     if pd.isna(x) or x == "":
-        return ""
+        return np.nan
 
     try:
         num = pd.to_numeric(x)
@@ -65,11 +65,6 @@ def preprocess_data(df):
         columns=[i for i in df.columns if "Unnamed" in i or "timestamp" in i],
         errors="ignore",
     )
-    non_numeric_cols = df.select_dtypes(exclude=[np.number, "bool"]).columns
-    for col in non_numeric_cols:
-        if col != "attack":
-            df[col] = pd.Categorical(df[col]).codes
-
     df.columns = [re.sub(r"[\[\]<>]", "_", str(col)) for col in df.columns]
     return df.astype(np.float32)
 
@@ -294,6 +289,15 @@ class XGBoostBaggingStrategy(XGBoostStrategy):
         super().__init__(model_dir, num_clients, val_data_path)
         self.global_model_json: Optional[bytes] = None
         self.leaf_scale = leaf_scale
+
+    def initialize_parameters(self, client_manager) -> Optional[Parameters]:
+        parameters = super().initialize_parameters(client_manager)
+        model_bytes = self._extract_payload(parameters)
+        if model_bytes:
+            booster = xgb.Booster()
+            booster.load_model(bytearray(model_bytes))
+            self.global_model_json = bytes(booster.save_raw("json"))
+        return parameters
 
     def aggregate_fit(
         self,
