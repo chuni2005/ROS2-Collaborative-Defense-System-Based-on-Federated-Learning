@@ -19,7 +19,7 @@ def convert_type(value):
         return value
 
     if pd.isna(value) or value == "":
-        return ""
+        return np.nan
 
     try:
         return pd.to_numeric(value)
@@ -59,12 +59,6 @@ def preprocess_data(df: pd.DataFrame) -> pd.DataFrame:
         columns=[col for col in df.columns if "Unnamed" in col or "timestamp" in col],
         errors="ignore",
     )
-
-    non_numeric_cols = df.select_dtypes(exclude=[np.number, "bool"]).columns
-    for col in non_numeric_cols:
-        if col != "attack":
-            df[col] = pd.Categorical(df[col]).codes
-
     df.columns = [re.sub(r"[\[\]<>]", "_", str(col)) for col in df.columns]
     return df.astype(np.float32)
 
@@ -111,7 +105,7 @@ def evaluate_model(model_path: str | Path, test_csv_path: str | Path) -> None:
 
 if __name__ == "__main__":
     base_dir = Path(__file__).resolve().parent
-    model_path = base_dir / "model" / "stratified_strategy" / "global_model_latest.ubj"
-    test_csv_path = base_dir / "test-data" / "stratified_strategy" / "test.csv"
+    model_path = base_dir / "model" / "global_model_round_1.ubj"
+    test_csv_path = base_dir / "test-data" / "test.csv"
 
     evaluate_model(model_path, test_csv_path)

@@ -8,6 +8,16 @@ from typing import Dict, List, Optional, Tuple
 import flwr as fl
 from flwr.common import FitRes, Parameters, Scalar
 from flwr.server.client_proxy import ClientProxy
+from sklearn.metrics import (
+    balanced_accuracy_score,
+    f1_score,
+    precision_score,
+    recall_score,
+)
+import json
+
+# precision/recall/F1 positive calss of attack lobel is 1
+POSITIVE_CLASS = 1
 
 
 def convert_type(x):
@@ -17,7 +27,7 @@ def convert_type(x):
         return x
 
     if pd.isna(x) or x == "":
-        return ""
+        return np.nan
 
     try:
         num = pd.to_numeric(x)
@@ -60,14 +70,49 @@ def preprocess_data(df):
         columns=[i for i in df.columns if "Unnamed" in i or "timestamp" in i],
         errors="ignore",
     )
-
-    non_numeric_cols = df.select_dtypes(exclude=[np.number, "bool"]).columns
-    for col in non_numeric_cols:
-        if col != "attack":
-            df[col] = pd.Categorical(df[col]).codes
-
     df.columns = [re.sub(r"[\[\]<>]", "_", str(col)) for col in df.columns]
     return df.astype(np.float32)
+
+
+def scale_leaf_values(model_json: bytes, w: float) -> bytes:
+    model = json.loads(bytearray(model_json))
+    trees = model["learner"]["gradient_booster"]["model"]["trees"]
+    for tree in trees:
+        left_children = tree["left_children"]
+        base_weights = tree["base_weights"]
+        split_conditions = tree["split_conditions"]
+        for i, left in enumerate(left_children):
+            if left == -1:  # is leaf node
+                base_weights[i] = base_weights[i] * w
+                split_conditions[i] = split_conditions[i] * w
+    return bytes(json.dumps(model), "utf-8")
+
+
+def aggregate_bagging_verified(
+    bst_prev_org: Optional[bytes], bst_curr_org: bytes
+) -> bytes:
+    if not bst_prev_org:
+        return bst_curr_org
+
+    bst_prev = json.loads(bytearray(bst_prev_org))
+    bst_curr = json.loads(bytearray(bst_curr_org))
+
+    gbtree_prev = bst_prev["learner"]["gradient_booster"]["model"]
+    trees_curr = bst_curr["learner"]["gradient_booster"]["model"]["trees"]
+    tree_num_prev = int(gbtree_prev["gbtree_model_param"]["num_trees"])
+    num_new_trees = len(trees_curr)
+
+    # insert trees behind the `bst_prev_org`
+    gbtree_prev["gbtree_model_param"]["num_trees"] = str(tree_num_prev + num_new_trees)
+    iteration_indptr = gbtree_prev["iteration_indptr"]
+    iteration_indptr.append(iteration_indptr[-1] + num_new_trees)
+
+    for tree_count in range(num_new_trees):
+        trees_curr[tree_count]["id"] = tree_num_prev + tree_count
+        gbtree_prev["trees"].append(trees_curr[tree_count])
+        gbtree_prev["tree_info"].append(0)
+
+    return bytes(json.dumps(bst_prev), "utf-8")
 
 
 class XGBoostStrategy(fl.server.strategy.FedAvg):
@@ -79,15 +124,7 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
         os.makedirs(self.model_dir, exist_ok=True)
         self.latest_model_path = os.path.join(self.model_dir, "global_model_latest.ubj")
 
-        self.dval = None
-        if val_data_path and os.path.exists(val_data_path):
-            print(f"[Info] Loading server-side validation data from {val_data_path}...")
-            df_val = pd.read_csv(val_data_path, low_memory=False)
-            df_val = preprocess_data(df_val)
-            X_val = df_val.iloc[:, :-1]
-            y_val = df_val.iloc[:, -1]
-            self.dval = xgb.DMatrix(X_val, label=y_val)
-            self.y_true = y_val.values
+        self._load_eval_dataset(val_data_path)
 
         super().__init__(
             fraction_fit=1.0,
@@ -96,6 +133,20 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
             min_evaluate_clients=0,
             min_available_clients=num_clients,
         )
+
+    def _load_eval_dataset(self, data_path: Optional[str]):
+        if data_path and os.path.exists(data_path):
+            print(f"[Info] Loading server-side validation data from {data_path}...")
+            df_val = pd.read_csv(data_path, low_memory=False)
+            df_val = preprocess_data(df_val)
+            X_val = df_val.iloc[:, :-1]
+            y_val = df_val.iloc[:, -1]
+            self.dval = xgb.QuantileDMatrix(X_val, label=y_val)
+            self.y_true = y_val.values
+        else:
+            raise FileNotFoundError(
+                f"Server-side eval data path given but not found: {data_path!r}"
+            )
 
     def initialize_parameters(self, client_manager) -> Optional[Parameters]:
         if os.path.exists(self.latest_model_path):
@@ -122,20 +173,66 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
             return None
         return bytes(parameters.tensors[0])
 
-    def _evaluate_model_on_server(self, model_bytes: bytes) -> float:
+    def _evaluate_model_on_server(self, model_bytes: bytes) -> Dict[str, float]:
+        metrics = {
+            "accuracy": 0.0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "class_0_recall": 0.0,
+            "class_0_f1": 0.0,
+            "balanced_accuracy": 0.0,
+            "margin_min": 0.0,
+            "margin_max": 0.0,
+            "margin_mean": 0.0,
+            "logloss": 1.0,
+        }
         if self.dval is None:
             return 0.0
         try:
             bst = xgb.Booster()
             bst.load_model(bytearray(model_bytes))
             preds = bst.predict(self.dval)
-
+            margin = bst.predict(self.dval, output_margin=True)
             preds_binary = [1 if p > 0.5 else 0 for p in preds]
             correct = sum(1 for p, y in zip(preds_binary, self.y_true) if p == y)
-            return correct / len(self.y_true)
+            metrics["accuracy"] = correct / len(self.y_true)
+            metrics["precision"] = precision_score(
+                self.y_true, preds_binary, pos_label=POSITIVE_CLASS, zero_division=0
+            )
+            metrics["recall"] = recall_score(
+                self.y_true, preds_binary, pos_label=POSITIVE_CLASS, zero_division=0
+            )
+            metrics["f1"] = f1_score(
+                self.y_true, preds_binary, pos_label=POSITIVE_CLASS, zero_division=0
+            )
+            metrics["class_0_recall"] = recall_score(
+                self.y_true, preds_binary, pos_label=0, zero_division=0
+            )
+            metrics["class_0_f1"] = f1_score(
+                self.y_true, preds_binary, pos_label=0, zero_division=0
+            )
+            metrics["balanced_accuracy"] = balanced_accuracy_score(
+                self.y_true, preds_binary
+            )
+
+            metrics["margin_min"] = float(np.min(margin))
+            metrics["margin_max"] = float(np.max(margin))
+            metrics["margin_mean"] = float(np.mean(margin))
+
+            eps = 1e-7
+            preds_clipped = np.clip(preds, eps, 1 - eps)
+            y_true_arr = np.asarray(self.y_true, dtype=np.float64)
+            metrics["logloss"] = float(
+                -np.mean(
+                    y_true_arr * np.log(preds_clipped)
+                    + (1 - y_true_arr) * np.log(1 - preds_clipped)
+                )
+            )
+
         except Exception as e:
             print(f"[Error] Failed to evaluate model on server: {e}")
-            return 0.0
+        return metrics
 
     def aggregate_fit(
         self,
@@ -143,6 +240,7 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
         results: List[Tuple[ClientProxy, FitRes]],
         failures: List[BaseException],
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
+        # choose the best F1
 
         if not results:
             print(f"[Warning] Round {server_round} has no fit results to aggregate.")
@@ -157,19 +255,23 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
         for client_proxy, fit_res in results:
             payload = self._extract_payload(fit_res.parameters)
             if payload:
-                if self.dval is not None:
-                    server_score = self._evaluate_model_on_server(payload)
-                    print(
-                        f"[Server Eval] Client {client_proxy.cid} Accuracy: {server_score:.4f}"
-                    )
-                    payloads.append((payload, server_score, client_proxy.cid))
-                else:
-                    metrics = fit_res.metrics or {}
-                    payloads.append(
-                        (payload, float(metrics.get("accuracy", 0.0)), client_proxy.cid)
-                    )
-
-        best_payload, best_accuracy, best_cid = max(payloads, key=lambda item: item[1])
+                server_metrics = self._evaluate_model_on_server(payload)
+                reported_client_id = (fit_res.metrics or {}).get("client_id", "?")
+                print(
+                    f"[Info] Server Eval Client {client_proxy.cid} (client_id={reported_client_id}) "
+                    f"Accuracy: {server_metrics['accuracy']:.4f} "
+                    f"Precision: {server_metrics['precision']:.4f} "
+                    f"Recall: {server_metrics['recall']:.4f} "
+                    f"F1: {server_metrics['f1']:.4f} "
+                    f"Class-0 Recall: {server_metrics['class_0_recall']:.4f} "
+                    f"Balanced Acc: {server_metrics['balanced_accuracy']:.4f}"
+                )
+                payloads.append(
+                    (payload, server_metrics, client_proxy.cid, reported_client_id)
+                )
+        best_payload, best_metrics, best_cid, best_client_id = max(
+            payloads, key=lambda item: item[1]["f1"]
+        )
 
         model_path = os.path.join(
             self.model_dir, f"global_model_round_{server_round}.ubj"
@@ -180,49 +282,140 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
             f.write(best_payload)
 
         print(
-            f"[Info] Round {server_round} kept the highest-scoring model (accuracy={best_accuracy:.4f}) "
+            f"[Info] Round {server_round} kept the highest-F1 model (client {best_cid}, "
+            f"client_id={best_client_id}, accuracy={best_metrics['accuracy']:.4f}, "
+            f"f1={best_metrics['f1']:.4f}) and saved it to {model_path}"
+        )
+        aggregated_parameters = Parameters(
+            tensors=[best_payload], tensor_type="xgboost-ubj"
+        )
+        return aggregated_parameters, {
+            "accuracy": best_metrics["accuracy"],
+            "precision": best_metrics["precision"],
+            "recall": best_metrics["recall"],
+            "f1": best_metrics["f1"],
+            "class_0_recall": best_metrics["class_0_recall"],
+            "class_0_f1": best_metrics["class_0_f1"],
+            "balanced_accuracy": best_metrics["balanced_accuracy"],
+        }
+
+
+class XGBoostBaggingStrategy(XGBoostStrategy):
+    def __init__(
+        self,
+        model_dir: str,
+        num_clients: int,
+        val_data_path: Optional[str] = None,
+        leaf_scale: float = 1.0,
+    ):
+        super().__init__(model_dir, num_clients, val_data_path)
+        self.global_model_json: Optional[bytes] = None
+        self.leaf_scale = leaf_scale
+
+    def initialize_parameters(self, client_manager) -> Optional[Parameters]:
+        parameters = super().initialize_parameters(client_manager)
+        model_bytes = self._extract_payload(parameters)
+        if model_bytes:
+            booster = xgb.Booster()
+            booster.load_model(bytearray(model_bytes))
+            self.global_model_json = bytes(booster.save_raw("json"))
+        return parameters
+
+    def aggregate_fit(
+        self,
+        server_round: int,
+        results: List[Tuple[ClientProxy, FitRes]],
+        failures: List[BaseException],
+    ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
+        # scale and bagging
+
+        if not results:
+            print(f"[Warning] Round {server_round} has no fit results to aggregate.")
+            return None, {}
+
+        if failures:
+            print(
+                f"[Warning] Round {server_round} had {len(failures)} client failure(s): {failures}"
+            )
+
+        print(
+            f"[Info] Bagging Round {server_round}: {len(results)}/{self.num_clients} "
+        )
+
+        merged_json = self.global_model_json
+        for client_proxy, fit_res in results:
+            payload = self._extract_payload(fit_res.parameters)
+            if not payload:
+                continue
+
+            reported_client_id = (fit_res.metrics or {}).get("client_id", "?")
+            bst = xgb.Booster()
+            bst.load_model(bytearray(payload))
+            payload_json = bst.save_raw("json")
+            num_trees_received = len(
+                json.loads(bytearray(payload_json))["learner"]["gradient_booster"][
+                    "model"
+                ]["trees"]
+            )
+            print(
+                f"[Bagging] Client {client_proxy.cid} (client_id={reported_client_id}, "
+                f"sent {num_trees_received} tree(s) this round."
+            )
+
+            payload_json = scale_leaf_values(payload_json, self.leaf_scale)
+            solo_json = aggregate_bagging_verified(self.global_model_json, payload_json)
+            solo_bst = xgb.Booster()
+            solo_bst.load_model(bytearray(solo_json))
+            solo_metrics = self._evaluate_model_on_server(
+                bytes(solo_bst.save_raw("ubj"))
+            )
+            print(
+                f"[Bagging][ClientScore] Round {server_round} client_id={reported_client_id} "
+                f"(cid={client_proxy.cid}) on validation (chunk_6): "
+                f"f1={solo_metrics['f1']:.4f} accuracy={solo_metrics['accuracy']:.4f} "
+                f"precision={solo_metrics['precision']:.4f} recall={solo_metrics['recall']:.4f} "
+                f"class_0_recall={solo_metrics['class_0_recall']:.4f} "
+                f"balanced_accuracy={solo_metrics['balanced_accuracy']:.4f}"
+            )
+            merged_json = aggregate_bagging_verified(merged_json, payload_json)
+
+        self.global_model_json = merged_json
+        bst_merged = xgb.Booster()
+        bst_merged.load_model(bytearray(merged_json))
+        merged_ubj = bytes(bst_merged.save_raw("ubj"))
+        merged_metrics = self._evaluate_model_on_server(merged_ubj)
+        model_path = os.path.join(
+            self.model_dir, f"global_model_round_{server_round}.ubj"
+        )
+
+        with open(model_path, "wb") as f:
+            f.write(merged_ubj)
+        with open(self.latest_model_path, "wb") as f:
+            f.write(merged_ubj)
+
+        print(
+            f"[Info] Round {server_round} bagging-merged {len(results)} client models "
+            f"(accuracy={merged_metrics['accuracy']:.4f}, f1={merged_metrics['f1']:.4f}, "
+            f"class_0_recall={merged_metrics['class_0_recall']:.4f}, "
+            f"balanced_accuracy={merged_metrics['balanced_accuracy']:.4f}, "
+            f"margin=[{merged_metrics['margin_min']:.2f}, {merged_metrics['margin_max']:.2f}], "
+            f"margin_mean={merged_metrics['margin_mean']:.2f}) "
             f"and saved it to {model_path}"
         )
 
         aggregated_parameters = Parameters(
-            tensors=[best_payload], tensor_type="xgboost-ubj"
+            tensors=[merged_ubj], tensor_type="xgboost-ubj"
         )
-        return aggregated_parameters, {"accuracy": best_accuracy}
 
-    # def aggregate_evaluate(
-    #     self,
-    #     server_round: int,
-    #     results: List[Tuple[ClientProxy, fl.common.EvaluateRes]],
-    #     failures: List[BaseException],
-    # ) -> Tuple[Optional[float], Dict[str, Scalar]]:
-
-    #     if not results:
-    #         print(f"Round {server_round} has no evaluate results to aggregate.")
-    #         return None, {}
-
-    #     if failures:
-    #         print(f"[Warning] Round {server_round} had {len(failures)} evaluate failure(s): {failures}")
-
-    #     accuracies = [float(r.metrics.get("accuracy", 0.0)) * r.num_examples for _, r in results]
-    #     losses = [float(r.loss) * r.num_examples for _, r in results]
-    #     examples = [r.num_examples for _, r in results]
-
-    #     total_examples = sum(examples)
-    #     if total_examples == 0:
-    #         return None, {}
-
-    #     weighted_accuracy = sum(accuracies) / total_examples
-    #     weighted_loss = sum(losses) / total_examples
-
-    #     per_client_acc = {
-    #         client_proxy.cid: float(r.metrics.get("accuracy", 0.0))
-    #         for client_proxy, r in results
-    #     }
-    #     print(f"[Diagnostic] Round {server_round} per-client accuracy: {per_client_acc}")
-    #     print(f"[Info] Round {server_round} global validation accuracy: {weighted_accuracy:.4f}, "
-    #           f"loss: {weighted_loss:.4f}\n")
-
-    #     return weighted_loss, {"accuracy": weighted_accuracy}
+        return aggregated_parameters, {
+            "accuracy": merged_metrics["accuracy"],
+            "precision": merged_metrics["precision"],
+            "recall": merged_metrics["recall"],
+            "f1": merged_metrics["f1"],
+            "class_0_recall": merged_metrics["class_0_recall"],
+            "class_0_f1": merged_metrics["class_0_f1"],
+            "balanced_accuracy": merged_metrics["balanced_accuracy"],
+        }
 
 
 if __name__ == "__main__":
@@ -253,16 +446,39 @@ if __name__ == "__main__":
     parser.add_argument(
         "--validation_data_path",
         type=str,
-        default="split-data/chunk_0.csv",
+        default="val-data/val.csv",
         help="Path to the validation data CSV file.",
+    )
+    parser.add_argument(
+        "--aggregation",
+        type=str,
+        default="winner",
+        choices=["winner", "bagging"],
+        help="winner = max() picks the single highest-F1 client model each round (default, existing behavior). "
+        "bagging = Flower's official bagging aggregate() concatenates every client's trees, none discarded. ",
+    )
+
+    parser.add_argument(
+        "--leaf_scale",
+        type=float,
+        default=0.5,
+        help="bagging/err_lfr aggregation mode: Adjusting the scaling when using tree bagging",
     )
     args = parser.parse_args()
 
-    strategy = XGBoostStrategy(
-        model_dir=args.model_dir,
-        num_clients=args.num_clients,
-        val_data_path=args.validation_data_path,
-    )
+    if args.aggregation == "bagging":
+        strategy = XGBoostBaggingStrategy(
+            model_dir=args.model_dir,
+            num_clients=args.num_clients,
+            val_data_path=args.validation_data_path,
+            leaf_scale=args.leaf_scale,
+        )
+    else:
+        strategy = XGBoostStrategy(
+            model_dir=args.model_dir,
+            num_clients=args.num_clients,
+            val_data_path=args.validation_data_path,
+        )
 
     print("[Info] Flower Server (XGBoost) is starting...")
     fl.server.start_server(

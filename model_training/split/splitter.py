@@ -9,6 +9,7 @@ import os
 import random
 
 from .structures import ChartImg, Chunk, IndexTable, OutputData, RowRecord, TempData
+from .categorical import DEFAULT_MAPPING_DIR, encode_categorical_csv
 
 
 class SplitStrategy(ABC):
@@ -30,9 +31,15 @@ class Splitter:
         chunk_num: int,
         strategy: SplitStrategy,
         hard_mode: bool = False,
+        mapping_dir: Path | str = DEFAULT_MAPPING_DIR,
     ):
         print("[Splitter] Initializing...")
         self.temp = TempData(Path(tmp_dir), src_path=Path(src_path))
+        encoded_path = encode_categorical_csv(
+            src_path, mapping_dir, output_dir=self.temp.temp_data_dir
+        )
+        if encoded_path is not None:
+            self.temp.replace_with(encoded_path)
         self.output = OutputData(Path(output_dir))
         self.chart = ChartImg(Path(chart_dir))
         self.chunk = Chunk(
@@ -72,6 +79,7 @@ class Splitter:
         ratio: float,
         output_path: Path | str,
         random_seed: Optional[int] = None,
+        save_each: bool = False,
     ) -> Path:
         if not 0 < ratio < 1:
             raise ValueError("[Error] ratio must be between 0 and 1 (exclusive).")
@@ -86,11 +94,28 @@ class Splitter:
             pool = records.copy()
             rng.shuffle(pool)
             take = max(1, math.ceil(len(pool) * ratio))
-            test_records.extend(pool[:take])
-            print(f"[Splitter] Ratio split - {label}: {take}/{len(pool)} rows selected.")
+            label_test_records = pool[:take]
+            test_records.extend(label_test_records)
+            print(
+                f"[Splitter] Ratio split - {label}: {take}/{len(pool)} rows selected."
+            )
+
+            if save_each:
+                label_output_path = (
+                    output_path.parent
+                    / f"{output_path.stem}_label_{label}{output_path.suffix}"
+                )
+                label_table = IndexTable(
+                    header_bytes=self.it.header_bytes, records=label_test_records
+                )
+                label_table.write_csv(self.temp.temp_data_path, label_output_path)
+                print(
+                    f"[Splitter] Individual label dataset saved to {label_output_path}"
+                )
 
         test_offsets = {record.offset for record in test_records}
 
+        rng.shuffle(test_records)
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -134,16 +159,16 @@ class Splitter:
         total_needed = self.chunk.chunk_size * self.chunk.chunk_num
         unit_size = self.chunk.chunk_size
         remain = 0
- 
+
         if self.it.row_num < total_needed:
             unit_size = self.it.row_num // self.chunk.chunk_num
             remain = self.it.row_num % self.chunk.chunk_num
- 
+
         self.chunk.chunk_path = [(path, unit_size) for path, _ in self.chunk.chunk_path]
- 
+
         if remain and self.chunk.chunk_path:
             last_path, last_size = self.chunk.chunk_path[-1]
-            self.chunk.chunk_path[-1] = (last_path, last_size + remain)    
+            self.chunk.chunk_path[-1] = (last_path, last_size + remain)
 
     # Reporting
     def plot_attack_labels(self, csv_path: str, title: str) -> None:

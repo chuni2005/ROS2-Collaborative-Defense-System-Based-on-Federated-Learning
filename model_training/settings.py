@@ -6,30 +6,36 @@ import subprocess
 import time
 import shutil
 
-from split import Chunk, RandomStrategy, Splitter, StratifiedStrategy, SequentialStrategy
+from split import (
+    Chunk,
+    RandomStrategy,
+    Splitter,
+    StratifiedStrategy,
+    SequentialStrategy,
+)
 
+# GLOBAL
 NUM_CLIENTS = 7
-NUM_ROUNDS = 10
+NUM_ROUNDS = 3
+TEST_RATIO = 0.001  #  ratio of every attack class
+VAL_RATIO = 0.0003  #  ratio of every attack class
+SERVER_ADDRESS = "127.0.0.1:8080"
+AGG_Mode = "bagging"
 
-TARGET_DATA = "../ROSPaCe_complete/ROSPaCe_complete_noperiodicity.csv"
-
-TEST_DIR = "test-data"
-TEST_DATA = f"{TEST_DIR}/test.csv"
-TEST_RATIO = 0.1  #  ratio of every attack class
-
-VAL_DIR = "val-data"
-VALIDATION_DATA = f"{VAL_DIR}/val.csv"
-VAL_RATIO = 0.005
-
-SPLIT_DIR = "split-data"
+# SPLIT
 CLIENT_STRATEGY = StratifiedStrategy
 SPLIT_UNIT = 1000  # per chunks  # ss=1000
-RANDOM_SEED = None
+RANDOM_SEED = 42
 
+# PATHS
+TARGET_DATA = "../ROSPaCe_complete/ROSPaCe_complete_noperiodicity.csv"
+SPLIT_DIR = "split-data"
+TEST_DIR = "test-data"
+VAL_DIR = "val-data"
+TEST_DATA = f"{TEST_DIR}/test.csv"
+VALIDATION_DATA = f"{VAL_DIR}/val.csv"
 LOG_DIR = "logs"
 MODEL_DIR = "model"
-
-SERVER_ADDRESS = "127.0.0.1:8080"
 
 
 class SysLogger(object):
@@ -130,12 +136,15 @@ class MainRunner(object):
             self.server_proc = subprocess.Popen(
                 [
                     sys.executable,
+                    "-u",
                     os.path.join(self.base_dir, "server.py"),
                     f"--model_dir={os.path.join(self.base_dir, MODEL_DIR)}",
-                    f"--num_clients={NUM_CLIENTS}",
                     f"--num_rounds={NUM_ROUNDS}",
-                    f"--validation_data_path={VALIDATION_DATA}",
+                    f"--num_clients={NUM_CLIENTS}",
                     f"--server_address={SERVER_ADDRESS}",
+                    f"--validation_data_path={VALIDATION_DATA}",
+                    f"--aggregation={AGG_Mode}",
+                    f"--leaf_scale={1/NUM_CLIENTS}",
                 ],
                 stdout=server_log,
                 stderr=server_log,
@@ -144,7 +153,7 @@ class MainRunner(object):
         server_address = SERVER_ADDRESS.split(":")
         self._wait_for_server_ready(server_address[0], int(server_address[1]))
 
-    def _wait_for_server_ready(self, host, port, timeout=120):
+    def _wait_for_server_ready(self, host, port, timeout=600):
         start = time.time()
         while time.time() - start < timeout:
             if self.server_proc.poll() is not None:
@@ -169,9 +178,12 @@ class MainRunner(object):
                 proc = subprocess.Popen(
                     [
                         sys.executable,
+                        "-u",
                         os.path.join(self.base_dir, "client.py"),
                         f"--client_id={i}",
                         f"--data_path={SPLIT_DIR}/chunk_{i}.csv",
+                        f"--aggregation={AGG_Mode}",
+                        f"--turn={self.turn}",
                     ],
                     stdout=client_log,
                     stderr=client_log,
@@ -180,6 +192,7 @@ class MainRunner(object):
                 self.client_procs.append(proc)
 
     def life_check(self):
+        self.turn += 1
         if self.server_proc is None:
             print(
                 "\n[Runner] Bruh cannot find the server process. Please ensure the server is running."
