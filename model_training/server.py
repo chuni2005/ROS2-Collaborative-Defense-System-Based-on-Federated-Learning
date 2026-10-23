@@ -8,7 +8,12 @@ from typing import Dict, List, Optional, Tuple
 import flwr as fl
 from flwr.common import FitRes, Parameters, Scalar
 from flwr.server.client_proxy import ClientProxy
-from sklearn.metrics import precision_score, recall_score, f1_score
+from sklearn.metrics import (
+    balanced_accuracy_score,
+    f1_score,
+    precision_score,
+    recall_score,
+)
 import json
 
 # precision/recall/F1 positive calss of attack lobel is 1
@@ -174,6 +179,9 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
             "precision": 0.0,
             "recall": 0.0,
             "f1": 0.0,
+            "class_0_recall": 0.0,
+            "class_0_f1": 0.0,
+            "balanced_accuracy": 0.0,
             "margin_min": 0.0,
             "margin_max": 0.0,
             "margin_mean": 0.0,
@@ -197,6 +205,15 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
             )
             metrics["f1"] = f1_score(
                 self.y_true, preds_binary, pos_label=POSITIVE_CLASS, zero_division=0
+            )
+            metrics["class_0_recall"] = recall_score(
+                self.y_true, preds_binary, pos_label=0, zero_division=0
+            )
+            metrics["class_0_f1"] = f1_score(
+                self.y_true, preds_binary, pos_label=0, zero_division=0
+            )
+            metrics["balanced_accuracy"] = balanced_accuracy_score(
+                self.y_true, preds_binary
             )
 
             metrics["margin_min"] = float(np.min(margin))
@@ -245,7 +262,9 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
                     f"Accuracy: {server_metrics['accuracy']:.4f} "
                     f"Precision: {server_metrics['precision']:.4f} "
                     f"Recall: {server_metrics['recall']:.4f} "
-                    f"F1: {server_metrics['f1']:.4f}"
+                    f"F1: {server_metrics['f1']:.4f} "
+                    f"Class-0 Recall: {server_metrics['class_0_recall']:.4f} "
+                    f"Balanced Acc: {server_metrics['balanced_accuracy']:.4f}"
                 )
                 payloads.append(
                     (payload, server_metrics, client_proxy.cid, reported_client_id)
@@ -275,6 +294,9 @@ class XGBoostStrategy(fl.server.strategy.FedAvg):
             "precision": best_metrics["precision"],
             "recall": best_metrics["recall"],
             "f1": best_metrics["f1"],
+            "class_0_recall": best_metrics["class_0_recall"],
+            "class_0_f1": best_metrics["class_0_f1"],
+            "balanced_accuracy": best_metrics["balanced_accuracy"],
         }
 
 
@@ -351,7 +373,9 @@ class XGBoostBaggingStrategy(XGBoostStrategy):
                 f"[Bagging][ClientScore] Round {server_round} client_id={reported_client_id} "
                 f"(cid={client_proxy.cid}) on validation (chunk_6): "
                 f"f1={solo_metrics['f1']:.4f} accuracy={solo_metrics['accuracy']:.4f} "
-                f"precision={solo_metrics['precision']:.4f} recall={solo_metrics['recall']:.4f}"
+                f"precision={solo_metrics['precision']:.4f} recall={solo_metrics['recall']:.4f} "
+                f"class_0_recall={solo_metrics['class_0_recall']:.4f} "
+                f"balanced_accuracy={solo_metrics['balanced_accuracy']:.4f}"
             )
             merged_json = aggregate_bagging_verified(merged_json, payload_json)
 
@@ -372,6 +396,8 @@ class XGBoostBaggingStrategy(XGBoostStrategy):
         print(
             f"[Info] Round {server_round} bagging-merged {len(results)} client models "
             f"(accuracy={merged_metrics['accuracy']:.4f}, f1={merged_metrics['f1']:.4f}, "
+            f"class_0_recall={merged_metrics['class_0_recall']:.4f}, "
+            f"balanced_accuracy={merged_metrics['balanced_accuracy']:.4f}, "
             f"margin=[{merged_metrics['margin_min']:.2f}, {merged_metrics['margin_max']:.2f}], "
             f"margin_mean={merged_metrics['margin_mean']:.2f}) "
             f"and saved it to {model_path}"
@@ -386,6 +412,9 @@ class XGBoostBaggingStrategy(XGBoostStrategy):
             "precision": merged_metrics["precision"],
             "recall": merged_metrics["recall"],
             "f1": merged_metrics["f1"],
+            "class_0_recall": merged_metrics["class_0_recall"],
+            "class_0_f1": merged_metrics["class_0_f1"],
+            "balanced_accuracy": merged_metrics["balanced_accuracy"],
         }
 
 

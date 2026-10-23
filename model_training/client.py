@@ -28,6 +28,7 @@ from ctypes import wintypes
 TENSOR_TYPE = "xgboost-ubj"
 NUM_BOOST_ROUND = 10
 POSITIVE_CLASS = 1
+CLASS_0_WEIGHT = 3.0
 ATTACK_SEED_BASE = 10000
 
 
@@ -390,8 +391,12 @@ def load_local_data(client_id, data_path, eval_data_path=None):
     )
 
     with _resource_checkpoint(client_id, "DMatrix creation - train"):
+        train_weights = np.where(y_train.to_numpy() == 0, CLASS_0_WEIGHT, 1.0)
         dtrain = xgb.DMatrix(
-            x_train.values, label=y_train.values, feature_names=train_feature_names
+            x_train.values,
+            label=y_train.values,
+            weight=train_weights,
+            feature_names=train_feature_names,
         )
     with _resource_checkpoint(client_id, "DMatrix creation - validation"):
         dval = xgb.DMatrix(
